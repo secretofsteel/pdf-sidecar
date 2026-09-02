@@ -203,7 +203,7 @@ def test_render_requires_exactly_one_of_matrix_and_dpi(client, two_page, extra):
         "/doc/render", json={"path": str(two_page), "page": 0, **extra}
     )
     assert response.status_code == 422
-    assert response.json()["detail"]["error"] == "contract"
+    assert response.json()["error"] == "contract"
 
 
 def test_render_page_fault_is_a_document_fault(client, mixed_pages):
@@ -390,3 +390,192 @@ def test_annotate_page_fault_is_a_document_fault(client, mixed_pages):
         ).status_code
         == 400
     )
+
+
+def test_dict_index_and_block_no_diverge_on_image_first_pages(client, image_first):
+    """The payload must expose both numberings, unreconciled.
+
+    dict mode counts the image; blocks mode does not. A consumer keys one by the
+    other and is off by one on exactly this cohort — a known defect that the
+    parity test compares against, so the sidecar must not quietly fix it.
+    """
+    row = _page_data(client, image_first, [0], ["dict_blocks", "blocks"]).json()[0]
+
+    dict_types = [b["type"] for b in row["dict_blocks"]]
+    assert dict_types[0] == 1, "the image must be dict block 0 on this fixture"
+    assert [b["index"] for b in row["dict_blocks"]] == list(range(len(dict_types)))
+
+    # blocks mode omits the image entirely, so its numbering starts at the text.
+    block_numbers = [b[5] for b in row["blocks"]]
+    assert block_numbers == [0, 1]
+    text_dict_indices = [b["index"] for b in row["dict_blocks"] if b["type"] == 0]
+    assert text_dict_indices == [1, 2]
+    assert text_dict_indices != block_numbers  # the divergence, preserved
+
+
+def test_page_blocks_actually_passes_the_reduced_flag_set(client, spans_fixture, monkeypatch):
+    """Assert the call, not just the output.
+
+    On many pages the two flag sets produce identical text, so comparing output
+    cannot prove which one was used. Capture the kwarg instead.
+    """
+    seen: list[object] = []
+    original = pymupdf.Page.get_text
+
+    def spy(self, option="text", **kwargs):
+        seen.append((option, kwargs.get("flags")))
+        return original(self, option, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "get_text", spy)
+    client.post("/doc/page-blocks", json={"path": str(spans_fixture), "page": 0})
+    assert seen == [("dict", pymupdf.TEXT_PRESERVE_WHITESPACE)]
+
+
+def test_page_data_dict_blocks_passes_no_flags(client, spans_fixture, monkeypatch):
+    """Its sibling must use the DEFAULT set — the difference is the point."""
+    seen: list[object] = []
+    original = pymupdf.Page.get_text
+
+    def spy(self, option="text", **kwargs):
+        seen.append((option, kwargs.get("flags")))
+        return original(self, option, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "get_text", spy)
+    _page_data(client, spans_fixture, [0], ["dict_blocks"])
+    assert seen == [("dict", None)]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"matrix": [2, 0, 0, 2, 0, 0], "clip": [72.0, 60.0, 200.0, 140.0]},
+        {"matrix": [2, 0, 0, 2, 0, 0], "clip": [400.0, 50.0, 460.0, 110.0]},
+        {"clip": [72.0, 60.0, 300.0, 160.0], "dpi": 200},
+        {"clip": [72.0, 60.0, 300.0, 160.0], "dpi": 220},
+    ],
+)
+def test_render_matches_the_engine_pixel_for_pixel(client, spans_fixture, extra):
+    """The four live call shapes, each compared against the engine itself.
+
+    Parity is decoded-pixel, not byte: get_pixmap writes the dpi into the PNG
+    header, so two renderings that agree on every pixel still differ in bytes.
+    """
+    response = client.post(
+        "/doc/render", json={"path": str(spans_fixture), "page": 0, **extra}
+    )
+    assert response.status_code == 200
+
+    kwargs = dict(extra)
+    if "matrix" in kwargs:
+        kwargs["matrix"] = pymupdf.Matrix(*kwargs["matrix"])
+    doc = pymupdf.open(str(spans_fixture))
+    try:
+        expected = doc[0].get_pixmap(**kwargs)
+    finally:
+        doc.close()
+
+    served = pymupdf.Pixmap(io.BytesIO(response.content))
+    assert (served.width, served.height) == (expected.width, expected.height)
+    assert served.samples == expected.samples
+
+
+def test_tables_bbox_failure_becomes_errors_bbox(client, table_fixture, monkeypatch):
+    """bbox is a computed property: it returns four floats or it raises.
+
+    When it raises the item carries errors.bbox and NO bbox, and the caller
+    reproduces its 1-pt strip. There is no cells fold to fall back on.
+    """
+    import pymupdf.table
+
+    monkeypatch.setattr(
+        pymupdf.table.Table,
+        "bbox",
+        property(lambda self: (_ for _ in ()).throw(ValueError("boom"))),
+    )
+    row = _page_data(client, table_fixture, [0], ["tables"]).json()[0]
+    assert row["tables"]
+    table = row["tables"][0]
+    assert "bbox" not in table
+    assert "bbox" in table["errors"]
+    assert table["rows"] is not None  # extraction still succeeded
+
+
+def test_table_extract_failure_is_a_per_item_fault(client, table_fixture, monkeypatch):
+    """Rule (c): the caller skips exactly that table, not the page.
+
+    Stubbed at the finder rather than by patching Table.extract, because
+    find_tables() calls extract() itself during header detection — patching the
+    method would break enumeration and exercise the part-level path instead of
+    the item-level one this test is about.
+    """
+
+    class _FailingTable:
+        bbox = (72.0, 200.0, 372.0, 300.0)
+
+        def extract(self):
+            raise RuntimeError("extract failed")
+
+    class _Finder:
+        tables = [_FailingTable()]
+
+    monkeypatch.setattr(pymupdf.Page, "find_tables", lambda self, *a, **kw: _Finder())
+    row = _page_data(client, table_fixture, [0], ["tables"]).json()[0]
+    table = row["tables"][0]
+    assert table["rows"] is None and "error" in table
+    assert list(table["bbox"]) == [72.0, 200.0, 372.0, 300.0]
+    assert row["errors"] == {}  # the PART did not fail, one item did
+
+
+def test_tables_enumeration_failure_is_a_part_fault(client, table_fixture, monkeypatch):
+    def boom(self, *a, **kw):
+        raise RuntimeError("find_tables failed")
+
+    monkeypatch.setattr(pymupdf.Page, "find_tables", boom)
+    row = _page_data(client, table_fixture, [0], ["tables"]).json()[0]
+    assert row["tables"] == []
+    assert "tables" in row["errors"]
+
+
+def test_scan_texttrace_failure_degrades_to_zero_counts(client, two_page, monkeypatch):
+    """Today's `tt = []`, reproduced — and the part is still emitted."""
+
+    def boom(self, *a, **kw):
+        raise RuntimeError("texttrace failed")
+
+    monkeypatch.setattr(pymupdf.Page, "get_texttrace", boom)
+    row = _page_data(client, two_page, [0], ["scan"]).json()[0]
+    assert row["scan"]["total_chars"] == 0
+    assert row["scan"]["invisible_chars"] == 0
+    assert "scan" in row["errors"]  # informational, not suppressing
+
+
+def test_scan_image_info_failure_nulls_the_ratio(client, two_page, monkeypatch):
+    """null is the value on which the caller declines to call a page scanned."""
+
+    def boom(self, *a, **kw):
+        raise RuntimeError("image_info failed")
+
+    monkeypatch.setattr(pymupdf.Page, "get_image_info", boom)
+    row = _page_data(client, two_page, [0], ["scan"]).json()[0]
+    assert row["scan"]["max_image_area_ratio"] is None
+    assert row["scan"]["total_chars"] > 0  # the other leg is unaffected
+
+
+def test_annotate_accepts_an_empty_annotation_list(client, two_page):
+    """The shape every unresolved-anchor request sends.
+
+    The caller re-saves unconditionally after annotating, so "nothing to
+    highlight" must come back as a valid PDF, not as an error.
+    """
+    response = client.post(
+        "/doc/annotate", json={"path": str(two_page), "annotations": []}
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+
+    doc = pymupdf.open(stream=response.content, filetype="pdf")
+    try:
+        assert list(doc[0].annots()) == []
+        assert doc.page_count == 2
+    finally:
+        doc.close()

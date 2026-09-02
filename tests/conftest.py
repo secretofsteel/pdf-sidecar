@@ -96,6 +96,26 @@ def spans_fixture(root: Path) -> Path:
 
 
 @pytest.fixture(scope="session")
+def image_first(root: Path) -> Path:
+    """An image ABOVE the text — the cohort where the two indexings diverge.
+
+    In blocks mode the text blocks are numbered 0,1; in dict mode the image
+    occupies index 0 and the same text lands at 1,2. A caller that keys one by
+    the other is off by one on exactly these pages, which is a known defect
+    preserved deliberately — so the payload has to expose both numberings
+    faithfully rather than reconciling them.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page()
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 40))
+    pix.set_rect(pix.irect, (0, 0, 255))
+    page.insert_image(pymupdf.Rect(72, 50, 152, 130), pixmap=pix)
+    page.insert_text((72, 200), "Text below the image.")
+    page.insert_text((72, 240), "Second text block.")
+    return _write(doc, root / "image_first.pdf")
+
+
+@pytest.fixture(scope="session")
 def table_fixture(root: Path) -> Path:
     """A ruled 2x2 grid — find_tables needs lines, not just aligned text."""
     doc = pymupdf.open()

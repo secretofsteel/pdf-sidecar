@@ -93,6 +93,11 @@ class Annotation(_Body):
 
 
 class AnnotateBody(DocBody):
-    annotations: list[Annotation] = Field(min_length=1)
+    # An EMPTY list is legal and must stay so: the caller re-saves the document
+    # unconditionally after annotating, so every request whose anchors all
+    # failed to resolve arrives here with nothing to highlight and still
+    # expects a valid PDF back. Refusing it would turn "we could not locate
+    # that citation" into a service error.
+    annotations: list[Annotation]
     garbage: int = 3
     deflate: bool = True

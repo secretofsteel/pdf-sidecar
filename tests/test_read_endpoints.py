@@ -30,7 +30,7 @@ def test_info_open_failure_is_a_document_fault(client, request, kind):
     path = request.getfixturevalue(kind)
     response = client.post("/doc/info", json={"path": str(path)})
     assert response.status_code == 400
-    assert response.json()["detail"]["error"] == "document"
+    assert response.json()["error"] == "document"
 
 
 # --------------------------------------------------------- /doc/text-pages
@@ -245,7 +245,7 @@ def test_page_words_page_fault_is_400_not_an_error_row(client, mixed_pages):
         "/doc/page-words", json={"path": str(mixed_pages), "page": 1}
     )
     assert response.status_code == 400
-    assert response.json()["detail"]["error"] == "document"
+    assert response.json()["error"] == "document"
 
 
 def test_page_words_out_of_range_is_400(client, two_page):
@@ -326,3 +326,71 @@ def test_page_blocks_page_fault_is_400(client, mixed_pages):
         ).status_code
         == 400
     )
+
+
+def test_search_returns_every_quad_of_a_multi_line_hit(client, root):
+    """One logical hit can be several quads; all of them are the highlight."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_textbox(
+        pymupdf.Rect(72, 80, 190, 160),
+        "wrapping anchor phrase continues here",
+        fontsize=11,
+    )
+    path = root / "wrapped.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    rows = client.post(
+        "/doc/search",
+        json={
+            "path": str(path),
+            "needles": ["wrapping anchor phrase continues"],
+            "page_order": [0],
+        },
+    ).json()["rows"]
+    assert rows and len(rows[0]["quads"]) >= 2
+    assert all(len(q) == 8 for q in rows[0]["quads"])
+
+
+def test_search_open_failure_has_no_rows(client, corrupt):
+    response = client.post(
+        "/doc/search",
+        json={"path": str(corrupt), "needles": ["x"], "page_order": [0]},
+    )
+    assert response.status_code == 400
+    assert "rows" not in response.json()
+
+
+def test_search_on_an_encrypted_document_is_all_error_rows(client, encrypted):
+    rows = client.post(
+        "/doc/search",
+        json={"path": str(encrypted), "needles": ["secret"], "page_order": [0, 1]},
+    ).json()["rows"]
+    assert len(rows) == 2 and all("error" in r for r in rows)
+
+
+def test_page_words_on_a_blank_page_is_an_empty_list(client, root):
+    doc = pymupdf.open()
+    doc.new_page()
+    path = root / "blank.pdf"
+    doc.save(str(path))
+    doc.close()
+    response = client.post("/doc/page-words", json={"path": str(path), "page": 0})
+    assert response.status_code == 200
+    assert response.json()["words"] == []
+
+
+def test_page_words_on_an_encrypted_document_is_400(client, encrypted):
+    assert (
+        client.post("/doc/page-words", json={"path": str(encrypted), "page": 0}).status_code
+        == 400
+    )
+
+
+def test_info_on_an_empty_file_is_a_document_fault(client, root):
+    path = root / "empty.pdf"
+    path.write_bytes(b"")
+    response = client.post("/doc/info", json={"path": str(path)})
+    assert response.status_code == 400
+    assert response.json()["error"] == "document"

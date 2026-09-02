@@ -21,7 +21,10 @@ os.environ.setdefault("PYMUPDF_SUGGEST_LAYOUT_ANALYZER", "0")
 
 import pymupdf
 import pymupdf4llm
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import SIDECAR_CONTRACT, SIDECAR_VERSION
 from .config import ALLOWED_ROOTS, WORKERS
@@ -52,6 +55,48 @@ LOGGER = logging.getLogger("sidecar")
 assert_free_layout()
 
 app = FastAPI(title="pdf-sidecar", version=SIDECAR_VERSION)
+
+
+# Every error leaves by one of these four doors, and every one of them emits the
+# same flat {"error": <slug>, "detail": <str>} body. FastAPI's own shapes would
+# otherwise give three different envelopes on the same service — a nested
+# {"detail": {...}} for our faults, a list of validation dicts for 422, and
+# plain text for an unhandled 500 — and a client cannot branch on that.
+
+
+@app.exception_handler(StarletteHTTPException)
+def _http_fault(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    if isinstance(exc.detail, dict) and "error" in exc.detail:
+        body = exc.detail  # one of ours, already in the contract's shape
+    else:
+        body = {"error": "http", "detail": str(exc.detail)}
+    return JSONResponse(status_code=exc.status_code, content=body)
+
+
+@app.exception_handler(RequestValidationError)
+def _validation_fault(request: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "contract",
+            "detail": "; ".join(
+                f"{'.'.join(str(p) for p in err['loc'][1:])}: {err['msg']}"
+                for err in exc.errors()
+            )
+            or "request body does not match the contract",
+        },
+    )
+
+
+@app.exception_handler(Exception)
+def _unexpected_fault(request: Request, exc: Exception) -> JSONResponse:
+    # A bug here is the service's fault, not the document's, so it must not be
+    # mistakable for a 400 — the caller degrades quietly on those.
+    LOGGER.exception("unhandled error serving %s", request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"error": "internal", "detail": f"{type(exc).__name__}: {exc}"},
+    )
 
 
 @app.get("/health")
@@ -145,8 +190,11 @@ def doc_render(body: RenderBody) -> Response:
 def doc_to_markdown(body: ToMarkdownBody) -> dict[str, str]:
     path = resolve_allowed(body.path)
     # image_path is written into, which makes it the more dangerous of the two
-    # path fields, not the lesser.
-    image_path = resolve_allowed(body.image_path)
+    # path fields, not the lesser. It is containment-checked but NOT substituted:
+    # the engine copies this string verbatim into the markdown's image targets,
+    # so handing it a resolved path would name a directory the caller never
+    # supplied.
+    resolve_allowed(body.image_path)
 
     canary = layout_canary()
     if canary is not None:
@@ -163,7 +211,7 @@ def doc_to_markdown(body: ToMarkdownBody) -> dict[str, str]:
             markdown = pymupdf4llm.to_markdown(
                 str(path),
                 write_images=body.write_images,
-                image_path=str(image_path),
+                image_path=body.image_path,
                 image_format=body.image_format,
                 dpi=body.dpi,
                 image_size_limit=body.image_size_limit,

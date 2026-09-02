@@ -93,32 +93,43 @@ def search(
     """
     rows: list[dict[str, Any]] = []
     for pno in page_order:
+        # The guard spans the extraction too, not just the page load: a page
+        # that loads and then fails mid-scan is the same kind of fault to the
+        # caller, and failing the whole request would lose the pages already
+        # scanned.
         try:
             page = doc[pno]
+            hit = _first_hit(page, pno, needles, quads)
         except Exception as exc:
             rows.append({"page": pno, "error": fault_detail(exc)})
             continue
-
-        for index, needle in enumerate(needles):
-            found = page.search_for(needle, quads=quads)
-            if not found:
-                continue
-            if quads:
-                geometry = [
-                    [q.ul.x, q.ul.y, q.ur.x, q.ur.y, q.ll.x, q.ll.y, q.lr.x, q.lr.y]
-                    for q in found
-                ]
-                rows.append({"page": pno, "needle_index": index, "quads": geometry})
-            else:
-                rows.append(
-                    {
-                        "page": pno,
-                        "needle_index": index,
-                        "rects": [[r.x0, r.y0, r.x1, r.y1] for r in found],
-                    }
-                )
+        if hit is not None:
+            rows.append(hit)
             return rows  # stop at the first hit; later pages are never visited
     return rows
+
+
+def _first_hit(
+    page: pymupdf.Page, pno: int, needles: list[str], quads: bool
+) -> dict[str, Any] | None:
+    for index, needle in enumerate(needles):
+        found = page.search_for(needle, quads=quads)
+        if found:
+            if quads:
+                return {
+                    "page": pno,
+                    "needle_index": index,
+                    "quads": [
+                        [q.ul.x, q.ul.y, q.ur.x, q.ur.y, q.ll.x, q.ll.y, q.lr.x, q.lr.y]
+                        for q in found
+                    ],
+                }
+            return {
+                "page": pno,
+                "needle_index": index,
+                "rects": [[r.x0, r.y0, r.x1, r.y1] for r in found],
+            }
+    return None
 
 
 # ----------------------------------------------------- /doc/page-words|blocks
@@ -285,13 +296,16 @@ def page_data(
         errors: dict[str, str] = {}
         try:
             page = doc[pno]
+            page_rect = list(page.rect)
         except Exception as exc:
+            # Rule (b): every requested part null under errors["page"], which
+            # the caller turns into a whole-document fallback.
             row = {"page": pno, "page_rect": None, "errors": {"page": fault_detail(exc)}}
             row.update({name: None for name in wanted})
             out.append(row)
             continue
 
-        row = {"page": pno, "page_rect": list(page.rect)}
+        row = {"page": pno, "page_rect": page_rect}
 
         if "text" in wanted:
             # DEFAULT flags, matching the in-process bare call.

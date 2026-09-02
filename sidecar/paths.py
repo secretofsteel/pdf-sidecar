@@ -22,7 +22,10 @@ def resolve_allowed(raw: str) -> Path:
     """
     try:
         candidate = Path(raw).resolve()
-    except (OSError, ValueError) as exc:  # e.g. a NUL byte in the path
+    except Exception as exc:
+        # Deliberately broad: a NUL byte raises ValueError, a symlink loop
+        # raises RuntimeError, and a caller-supplied path must never be able to
+        # produce a 500. Anything unresolvable is simply not in the allowlist.
         raise PathNotAllowed(f"unresolvable path: {exc}") from exc
 
     for root in ALLOWED_ROOTS:

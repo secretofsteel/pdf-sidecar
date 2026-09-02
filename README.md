@@ -19,7 +19,19 @@ what keeps this repository generic enough to publish.
 
 ## Licence
 
-AGPL-3.0-or-later. See [LICENSE](LICENSE).
+This wrapper is **AGPL-3.0-or-later**. See [LICENSE](LICENSE).
+
+It depends on two works that are **dual licensed AGPL-3.0 / Artifex
+Commercial**, and uses them under the AGPL:
+
+| dependency | version | licence |
+|---|---|---|
+| PyMuPDF | 1.28.2 | AGPL-3.0 or Artifex Commercial |
+| pymupdf4llm | 0.2.9 | AGPL-3.0 or Artifex Commercial |
+
+No commercial licence is held for either, which is why this repository is
+published in full and why `pymupdf-layout` — a third component under a
+different, non-commercial licence — is refused outright (see below).
 
 If you deploy a modified version of this service and let anyone interact with
 it over a network, §13 of the AGPL requires you to offer them its source.

@@ -55,18 +55,34 @@ def _load_allowed_roots() -> list[Path]:
         )
         return []
 
+    # All-or-nothing: a partially-parsed allowlist would silently enforce a
+    # narrower boundary than the operator wrote, which is the one outcome worse
+    # than refusing everything.
     roots: list[Path] = []
     for entry in parsed:
         root = Path(entry)
         if not root.is_absolute():
-            LOGGER.error("allowlist root %r is not absolute — ignored", entry)
-            continue
-        # Resolve on THIS side too: the app resolves its own paths, and a
-        # symlinked root (a pytest basetemp, commonly) would otherwise fail
-        # containment against an unresolved root.
-        roots.append(root.resolve())
+            LOGGER.error(
+                "allowlist root %r is not absolute — the allowlist is EMPTY and "
+                "every request will be refused with 403", entry,
+            )
+            return []
+        try:
+            # Resolve on THIS side too: the app resolves its own paths, and a
+            # symlinked root (a pytest basetemp, commonly) would otherwise fail
+            # containment against an unresolved root.
+            roots.append(root.resolve())
+        except Exception as exc:
+            # Never raise from module import: under `--workers N` an import-time
+            # exception is a respawn loop, not a stop, and only the licence
+            # canary is allowed to refuse startup.
+            LOGGER.error(
+                "allowlist root %r could not be resolved (%s) — the allowlist "
+                "is EMPTY and every request will be refused with 403", entry, exc,
+            )
+            return []
     if not roots:
-        LOGGER.error("allowlist resolved to no usable roots — every request 403s")
+        LOGGER.error("allowlist is empty — every request will be refused with 403")
     else:
         LOGGER.info("allowlist: %s", ", ".join(str(r) for r in roots))
     return roots

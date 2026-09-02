@@ -1,0 +1,19 @@
+# Runtime pins for the pdf-sidecar service.
+#
+# pymupdf is pinned EXACTLY, not floored. 1.28.0's get_texttrace() corrupts
+# refcounts and kills the interpreter with an UNCATCHABLE
+# `Fatal Python error: none_dealloc` after ~200 calls, and get_texttrace is
+# exactly what the /doc/page-data "scan" part calls. Isolated during Spec 1.
+pymupdf==1.28.2
+
+# pymupdf4llm serves /doc/to-markdown ONLY. Its own `layout/` subpackage is a
+# one-line re-export of `import pymupdf.layout` — importing it (directly or via
+# pymupdf4llm.layout) flips pymupdf._get_layout process-wide and binds the
+# COMMERCIAL PyMuPDF-Layout parser. See README "The PyMuPDF-Layout landmine".
+# pymupdf-layout is NEVER installed here; the startup assert refuses to boot
+# if it is present.
+pymupdf4llm==0.2.9
+
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+python-dotenv==1.2.3

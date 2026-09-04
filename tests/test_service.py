@@ -15,7 +15,7 @@ from sidecar.licence import assert_free_layout, layout_canary
 REPO = Path(__file__).resolve().parent.parent
 
 
-def test_health_has_exactly_the_eight_contract_fields(client):
+def test_health_has_exactly_the_nine_contract_fields(client):
     body = client.get("/health").json()
     assert set(body) == {
         "status",
@@ -26,6 +26,7 @@ def test_health_has_exactly_the_eight_contract_fields(client):
         "layout_canary",
         "workers",
         "allowed_roots",
+        "ocr",
     }
     assert body["status"] == "ok"
     assert body["version"] == SIDECAR_VERSION
@@ -36,6 +37,9 @@ def test_health_has_exactly_the_eight_contract_fields(client):
     assert body["layout_canary"] is None
     assert isinstance(body["workers"], int)
     assert isinstance(body["allowed_roots"], list) and body["allowed_roots"]
+    # The deploy gate prints this unconditionally and asserts it only at
+    # contract >= 3, so what /health owes it is a boolean, always present.
+    assert isinstance(body["ocr"], bool)
 
 
 def test_health_reports_the_roots_it_actually_enforces(client, root):

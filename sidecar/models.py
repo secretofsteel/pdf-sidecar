@@ -58,6 +58,25 @@ class PageDataBody(DocBody):
     ] = Field(min_length=1)
 
 
+class PageWordsOcrBody(PageBody):
+    """`/doc/page-words-ocr` — Tesseract words for one page.
+
+    Both extra fields are bounded at the FIELD, which is what keeps their 422
+    detail field-shaped rather than model-level:
+
+    * `dpi` — OCR renders the page to a bitmap first, so this is an allocation
+      knob, not a quality knob. 1200 dpi on an A4 page is a 1.75 GB pixmap
+      inside a worker that holds the GIL for the whole call.
+    * `language` — a Literal rather than a free string because MuPDF answers a
+      mistyped language code and a MISSING traineddata file with the same
+      `FzErrorLibrary code=3`. A typo would be indistinguishable from a broken
+      deployment, so only the file this service ships with is accepted.
+    """
+
+    dpi: int = Field(ge=72, le=600)
+    language: Literal["eng"]
+
+
 class RenderBody(PageBody):
     clip: list[float] | None = Field(default=None, min_length=4, max_length=4)
     matrix: list[float] | None = Field(default=None, min_length=6, max_length=6)
@@ -103,6 +122,25 @@ class PageRange(_Body):
     start: PageIndex
     end: PageIndex
 
+    @model_validator(mode="after")
+    def _window_is_well_formed(self) -> "PageRange":
+        """The two rules that need only start and end, so they live here.
+
+        Both are cross-field and therefore model-level; they report under
+        ``"page_range: Value error, ..."`` while the `ge=0` field rule reports
+        under ``"page_range.start: ..."``. That is the shape, not a bug to
+        chase into a field validator — the status and the ``contract`` slug
+        are what a caller branches on.
+        """
+        if self.start > self.end:
+            raise ValueError(f"start {self.start} is after end {self.end}")
+        if self.end - self.start + 1 > MAX_PAGES_PER_REQUEST:
+            raise ValueError(
+                f"{self.end - self.start + 1} pages requested, at most "
+                f"{MAX_PAGES_PER_REQUEST} per request"
+            )
+        return self
+
 
 class AnnotateBody(DocBody):
     # An EMPTY list is legal and must stay so: the caller re-saves the document
@@ -118,32 +156,21 @@ class AnnotateBody(DocBody):
     page_range: PageRange | None = None
 
     @model_validator(mode="after")
-    def _page_range_is_answerable(self) -> "AnnotateBody":
-        """The three range rules that can be decided from the request alone.
+    def _annotations_are_inside_the_window(self) -> "AnnotateBody":
+        """The third request-decidable rule — here because it needs both fields.
 
-        The fourth — ``end < page_count`` — cannot: pydantic never opens the
-        document, and ``insert_pdf`` does not refuse a past-the-end range, it
-        CLAMPS, so ``8..12`` on a ten-page document would come back as one
-        page with nothing anywhere reporting a problem. That one is checked in
-        ``engine.annotate`` instead.
+        Its detail reads ``": Value error, <message>"`` with an empty field
+        path, being a rule about the body rather than about one field of it.
 
-        All three are cross-field and therefore model-level, so their 422
-        detail reads ``": Value error, <message>"`` with an empty field path.
-        That is the shape, not a bug to chase into a field validator; the
-        status and the ``contract`` slug are what the caller branches on.
+        The FOURTH rule, ``end < page_count``, is not decidable here at all:
+        pydantic never opens the document, and ``insert_pdf`` does not refuse
+        a past-the-end range — it CLAMPS, so ``8..12`` on a ten-page document
+        would come back as one plausible page with nothing anywhere reporting
+        a problem. That one lives in ``engine.annotate``.
         """
         window = self.page_range
         if window is None:
             return self
-        if window.start > window.end:
-            raise ValueError(
-                f"page_range: start {window.start} is after end {window.end}"
-            )
-        if window.end - window.start + 1 > MAX_PAGES_PER_REQUEST:
-            raise ValueError(
-                f"page_range: {window.end - window.start + 1} pages requested, "
-                f"at most {MAX_PAGES_PER_REQUEST} per request"
-            )
         for item in self.annotations:
             if not window.start <= item.page <= window.end:
                 raise ValueError(

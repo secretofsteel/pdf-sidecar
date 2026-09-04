@@ -31,7 +31,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import SIDECAR_CONTRACT, SIDECAR_VERSION
 from .config import ALLOWED_ROOTS, WORKERS
 from .errors import ContractFault, DocumentFault, LayoutCanaryTripped, fault_detail
-from .handles import FITZ_LOCK, cached_document
+from .handles import FITZ_LOCK, cached_document, ocr_words
 from .licence import assert_free_layout, layout_canary
 from .models import (
     AnnotateBody,
@@ -39,6 +39,7 @@ from .models import (
     PageBody,
     PageDataBody,
     PagesBody,
+    PageWordsOcrBody,
     RenderBody,
     SearchBody,
     ToMarkdownBody,
@@ -64,6 +65,55 @@ LOGGER = logging.getLogger("sidecar")
 # (the deploy gate and the per-call contract check catch those); an unlicensed
 # engine must never serve a single request.
 assert_free_layout()
+
+
+def _tessdata_report() -> str:
+    """Where MuPDF would look, and whether the file is actually there.
+
+    ``get_tessdata()`` does NOT validate what it returns, which is exactly why
+    the false branch has to print both halves: a prefix pointing at the wrong
+    directory and a directory with no ``eng.traineddata`` in it produce the
+    same engine error, and neither is visible from the error text.
+    """
+    try:
+        resolved = pymupdf.get_tessdata()
+    except Exception as exc:
+        return f"tessdata dir unresolved ({fault_detail(exc)})"
+    traineddata = os.path.join(str(resolved), "eng.traineddata")
+    return (
+        f"tessdata dir {resolved!r}, "
+        f"eng.traineddata {'present' if os.path.exists(traineddata) else 'ABSENT'}"
+    )
+
+
+def _probe_ocr() -> bool:
+    """Capability by EXECUTION, once per worker, at import.
+
+    Deliberately placed after ``logging.basicConfig`` above: a line emitted
+    before it is dropped, which is how the allowlist line went missing from a
+    live worker log.
+
+    Never raises. A worker with no Tesseract must still serve the other nine
+    endpoints; what it must not do is claim it can OCR. The result rides on
+    /health so the caller can stop asking rather than discover it one 500 at
+    a time.
+    """
+    try:
+        with FITZ_LOCK:
+            engine.ocr_probe()
+    except Exception as exc:
+        LOGGER.warning(
+            "OCR unavailable in this worker (%s) — %s; /health.ocr reports "
+            "false and /doc/page-words-ocr will fail",
+            fault_detail(exc),
+            _tessdata_report(),
+        )
+        return False
+    LOGGER.info("OCR available: %s", _tessdata_report())
+    return True
+
+
+OCR_AVAILABLE: bool = _probe_ocr()
 
 app = FastAPI(title="pdf-sidecar", version=SIDECAR_VERSION)
 
@@ -126,6 +176,9 @@ def health() -> dict[str, object]:
         "layout_canary": layout_canary(),
         "workers": WORKERS,
         "allowed_roots": [str(r) for r in ALLOWED_ROOTS],
+        # Cached from the startup probe, unlike layout_canary: this one is a
+        # property of the deployment, not something an import can flip.
+        "ocr": OCR_AVAILABLE,
     }
 
 
@@ -161,6 +214,24 @@ def doc_page_words(body: PageBody) -> dict[str, object]:
     path = resolve_allowed(body.path)
     with FITZ_LOCK:
         return {"words": engine.page_words(cached_document(path), body.page)}
+
+
+@app.post("/doc/page-words-ocr")
+def doc_page_words_ocr(body: PageWordsOcrBody) -> dict[str, object]:
+    """Tesseract words for one page, in `/doc/page-words`' envelope and shape.
+
+    The same 8-element rows from a different source of truth, which is the
+    whole point: these words exist on pages that carry no glyphs at all. The
+    caller wants GEOMETRY from them — where on the page a phrase it already
+    has sits — not text.
+
+    Under FITZ_LOCK like every other engine call. It is a long one — 0.5-3.5 s
+    of held GIL at 300 dpi — which is why the production unit runs with
+    `--timeout-worker-healthcheck` and why the result is cached per worker.
+    """
+    path = resolve_allowed(body.path)
+    with FITZ_LOCK:
+        return {"words": ocr_words(path, body.page, body.dpi, body.language)}
 
 
 @app.post("/doc/page-blocks")

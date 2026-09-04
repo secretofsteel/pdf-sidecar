@@ -23,7 +23,7 @@ os.environ.setdefault("PDF_SIDECAR_WORKERS", "4")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from sidecar.handles import clear_cache  # noqa: E402
+from sidecar.handles import clear_cache, clear_ocr_cache  # noqa: E402
 from sidecar.main import app  # noqa: E402
 
 
@@ -34,12 +34,15 @@ def root() -> Path:
 
 @pytest.fixture
 def client() -> TestClient:
-    # Handles are process-global; a stale one would let an earlier test's
-    # document satisfy a later test's request.
+    # Handles and OCR word lists are both process-global; a stale entry would
+    # let an earlier test's document satisfy a later test's request, and a
+    # stale OCR list would let a test that stubs the engine still get words.
     clear_cache()
+    clear_ocr_cache()
     with TestClient(app) as c:
         yield c
     clear_cache()
+    clear_ocr_cache()
 
 
 def _write(doc: pymupdf.Document, path: Path) -> Path:

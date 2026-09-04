@@ -205,6 +205,53 @@ def page_blocks(doc: pymupdf.Document, index: int) -> list[dict[str, Any]]:
     return blocks
 
 
+# ------------------------------------------------------- /doc/page-words-ocr
+
+
+def ocr_probe() -> None:
+    """Execute the smallest possible OCR: a 1x1 in-memory page (~6 ms).
+
+    Capability is answered by DOING it rather than by looking for a file.
+    ``get_tessdata()`` reports the directory MuPDF will use but does not
+    validate it, and the three ways this can be broken — no traineddata at
+    all, a prefix pointing at the wrong directory, a language whose file is
+    absent — are not distinguishable from outside. An executed OCR is.
+
+    Raises whatever the engine raises; the caller decides what that means.
+    """
+    doc = pymupdf.open()
+    try:
+        # Bound, not chained: a Page must outlive what is read off it.
+        page = doc.new_page(width=1, height=1)
+        page.get_textpage_ocr(full=True, dpi=72, language="eng")
+    finally:
+        doc.close()
+
+
+def page_words_ocr(
+    doc: pymupdf.Document, index: int, dpi: int, language: str
+) -> list[list[Any]]:
+    """`get_text("words")` over a TESSERACT textpage — the same 8-element rows.
+
+    Same shape as ``page_words``, different source: these words come from an
+    OCR of the rendered page, so they exist on pages carrying no glyphs at
+    all. Tesseract emits one block per visual line, and elements 5 and 6 stay
+    load-bearing for exactly the reason they are there in the glyph form.
+
+    ``page`` is bound across BOTH calls. The textpage is a view onto it, and
+    a page released between the two is the fatal form.
+
+    Only the page load sits inside the fault mapping. A Tesseract failure is
+    deliberately left to raise: it means the SERVICE cannot OCR — a missing
+    traineddata file, a misconfigured prefix — which must reach the caller as
+    a 5xx and never as "this document is unusable", because the caller
+    degrades quietly on the latter and would silently stop OCR-ing everything.
+    """
+    page = _page(doc, index)
+    textpage = page.get_textpage_ocr(full=True, dpi=dpi, language=language)
+    return [list(w) for w in page.get_text("words", textpage=textpage)]
+
+
 # ------------------------------------------------------------- /doc/page-data
 
 

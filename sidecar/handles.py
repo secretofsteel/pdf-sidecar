@@ -18,6 +18,7 @@ by reading the MuPDF docs:
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import threading
@@ -26,6 +27,7 @@ from pathlib import Path
 
 import pymupdf
 
+from . import engine
 from .errors import DocumentFault, fault_detail
 
 LOGGER = logging.getLogger("sidecar.handles")
@@ -100,3 +102,56 @@ def clear_cache() -> None:
 
 def cache_size() -> int:
     return len(_cache)
+
+
+# ------------------------------------------------------------ the OCR words cache
+#
+# One page of OCR costs 0.5-3.5 s of HELD GIL, and one citation routinely puts
+# several of its anchors on the same page, so the second ask must not pay for
+# it again.  ``functools.lru_cache`` is right here and wrong for the handle
+# cache above, and the difference is closability: what this holds is a list of
+# tuples with no ``close()`` to get wrong at eviction, whereas a Document
+# evicted outside FITZ_LOCK is a native-code hazard.
+#
+# Per worker, like everything else in this module.
+_OCR_CACHE_SIZE = 32
+
+
+@functools.lru_cache(maxsize=_OCR_CACHE_SIZE)
+def _ocr_words(
+    version: tuple[str, int, int], path: str, page: int, dpi: int, language: str
+) -> list[list]:
+    """The cached body.  ``version`` is unread on purpose.
+
+    It is in the signature so that rewriting the file MISSES — exactly as it
+    invalidates a document handle above — and nowhere in the body because the
+    path is what opens the document.
+    """
+    return engine.page_words_ocr(cached_document(Path(path)), page, dpi, language)
+
+
+def ocr_words(path: Path, page: int, dpi: int, language: str) -> list[list]:
+    """Cached Tesseract words for one page.  Call under FITZ_LOCK.
+
+    The returned list is SHARED with the cache: a caller that mutates it
+    poisons every later hit.  Nothing does — it is serialised straight to
+    JSON — and copying a 400-row word list on every hit would spend most of
+    what the cache saves.
+    """
+    try:
+        version = _key(path)
+    except OSError as exc:
+        # A file deleted between the allowlist check and here. Without this the
+        # bare os.stat would 500 where the fault taxonomy says 400.
+        raise DocumentFault(fault_detail(exc)) from exc
+    return _ocr_words(version, str(path), page, dpi, language)
+
+
+def ocr_cache_info() -> functools._CacheInfo:
+    """Hits/misses — the only way to prove the cache is a cache."""
+    return _ocr_words.cache_info()
+
+
+def clear_ocr_cache() -> None:
+    """Drop every cached word list.  Tests use this; the service does not."""
+    _ocr_words.cache_clear()

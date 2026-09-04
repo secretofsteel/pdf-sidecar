@@ -12,7 +12,7 @@ lets the caller decide what they mean.  See README.md for why it exists.
 # constant matches the tag (leading `v` stripped) and skips, loudly and by
 # name, when HEAD carries no tag. (There is no tests/test_version.py; this
 # comment named one for three releases.)
-SIDECAR_VERSION = "0.1.4"
+SIDECAR_VERSION = "0.1.5"
 
 # Wire-contract version.  Any wire-shape change — a field added, removed or
 # retyped, or a status code changed — increments this in BOTH repos in one
@@ -21,4 +21,5 @@ SIDECAR_VERSION = "0.1.4"
 # 2: /doc/annotate takes an optional page_range and answers with the three
 #    X-Pdf-Sidecar-Excerpt-*/Total-Pages headers on every response;
 #    /doc/info gains ocg_count.
-SIDECAR_CONTRACT = 2
+# 3: /doc/page-words-ocr; /health gains ocr.
+SIDECAR_CONTRACT = 3

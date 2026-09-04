@@ -95,6 +95,7 @@ saving a large document is killed mid-save.
 | `PORT` | listen port (loopback only) |
 | `PDF_SIDECAR_WORKERS` | uvicorn worker processes; reported by `/health` |
 | `PDF_SIDECAR_ALLOWED_ROOTS` | **JSON array of absolute paths.** Every path-valued request field is resolved and containment-checked against these roots. |
+| `TESSDATA_PREFIX` | Directory holding Tesseract's `eng.traineddata`, for `/doc/page-words-ocr`. Unset or wrong → `/health.ocr` false; every other endpoint is unaffected. |
 
 `PDF_SIDECAR_ALLOWED_ROOTS` is JSON rather than a separator-joined string
 because a Windows path (`C:/dev/...`) would split on `:`. It is read by systemd's
@@ -106,6 +107,26 @@ and a service that starts and refuses every request with 403. That is
 deliberate: refusing to boot would turn a configuration typo into a restart
 loop on every dependent unit, whereas 403-with-a-reason is loud, safe and
 diagnosable.
+
+### OCR and `TESSDATA_PREFIX`
+
+`TESSDATA_PREFIX` points **AT** the directory that holds the traineddata file,
+not at its parent. Ship **`tessdata_fast`'s `eng.traineddata`**: measured
+against the standard file it returns identical words (396 on a dense page) and
+runs ~2.4× faster (3.5 s against 8.5 s), and this layer's accuracy bar is a
+fuzzy word-window match against text the caller already has — it wants
+geometry, not a text of record. The standard `eng.traineddata` is the
+documented alternative if OCR quality ever turns out to be what a miss is
+attributable to; it is a file swap and nothing else.
+
+Capability is decided by **executing** a 1×1-page OCR once per worker at
+startup, not by looking for the file: `pymupdf.get_tessdata()` reports the
+directory MuPDF will use but does not validate it, and no tessdata at all, a
+prefix pointing somewhere wrong, and a language whose file is missing are not
+distinguishable from their errors alone (the last two are both
+`FzErrorLibrary code=3`). The result is `/health.ocr`, and the false branch
+logs the resolved directory **and** whether `eng.traineddata` is in it, which
+is what actually tells the two apart.
 
 ## Endpoints
 
@@ -120,6 +141,7 @@ All are `POST` with a JSON body except `/health`. Every one takes an absolute
 | `/doc/search` | `{rows: [...]}`; page-major, needle-minor, stops at the first hit |
 | `/doc/page-words` | `get_text("words")` rows, verbatim 8-element |
 | `/doc/page-blocks` | text blocks as `{bbox, text}` |
+| `/doc/page-words-ocr` | the same 8-element rows, from a **Tesseract** textpage — words on pages that carry no glyphs |
 | `/doc/page-data` | a part-selectable per-page payload (text, blocks, dict blocks, tables, clusters, drawings, images, scan facts) |
 | `/doc/render` | PNG bytes; a `get_pixmap` passthrough |
 | `/doc/to-markdown` | `{markdown}` via pymupdf4llm's free legacy parser |
@@ -173,6 +195,7 @@ reports the count and takes no view.
 | path outside the allowlist, or traversing out of it | `403 {"error": "path_not_allowed"}` |
 | the request violates this contract | `422 {"error": "contract"}` |
 | the layout canary tripped | `503 {"error": "layout_canary"}` |
+| the service itself failed — a bug, or a dependency that is not there (`/doc/page-words-ocr` with no working Tesseract) | `500 {"error": "internal"}` |
 
 The 400 class is the important one: it means *this document is unusable*, which
 a caller should handle exactly as it already handles a bad document. Everything

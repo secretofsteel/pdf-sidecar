@@ -43,6 +43,15 @@ from .models import (
 )
 from .paths import resolve_allowed
 from . import engine
+from .engine_state import markdown_state, restore_baseline
+
+# `import pymupdf4llm` above has just switched quad corrections off for the
+# whole process (see engine_state.py).  Every endpoint but /doc/to-markdown
+# ports code that ran at PyMuPDF's defaults, so put the process back there
+# before the first request — prod 2026-09-03: 193/669 documents lost the
+# spaces in their table cells until a worker happened to serve one markdown
+# request.
+restore_baseline()
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -206,21 +215,24 @@ def doc_to_markdown(body: ToMarkdownBody) -> dict[str, str]:
         raise LayoutCanaryTripped(f"pymupdf._get_layout is {canary}")
 
     with FITZ_LOCK:
-        try:
-            # The PATH, never a cached Document: to_markdown calls doc.bake().
-            markdown = pymupdf4llm.to_markdown(
-                str(path),
-                write_images=body.write_images,
-                image_path=body.image_path,
-                image_format=body.image_format,
-                dpi=body.dpi,
-                image_size_limit=body.image_size_limit,
-                force_text=body.force_text,
-                table_strategy=body.table_strategy,
-                page_separators=body.page_separators,
-            )
-        except Exception as exc:
-            raise DocumentFault(fault_detail(exc)) from exc
+        # The state to_markdown's own import established, restored afterwards
+        # (engine_state.py) — this call mutates pymupdf.table.FLAGS too.
+        with markdown_state():
+            try:
+                # The PATH, never a cached Document: to_markdown calls doc.bake().
+                markdown = pymupdf4llm.to_markdown(
+                    str(path),
+                    write_images=body.write_images,
+                    image_path=body.image_path,
+                    image_format=body.image_format,
+                    dpi=body.dpi,
+                    image_size_limit=body.image_size_limit,
+                    force_text=body.force_text,
+                    table_strategy=body.table_strategy,
+                    page_separators=body.page_separators,
+                )
+            except Exception as exc:
+                raise DocumentFault(fault_detail(exc)) from exc
     return {"markdown": markdown if isinstance(markdown, str) else ""}
 
 

@@ -77,11 +77,16 @@ venv/bin/pip install -r requirements.txt      # POSIX
 
 cp .env.example .env        # then set PDF_SIDECAR_ALLOWED_ROOTS (see below)
 
-venv/bin/uvicorn sidecar.main:app --host 127.0.0.1 --port 8077 --workers 4 --no-access-log
+venv/bin/uvicorn sidecar.main:app --host 127.0.0.1 --port 8077 --workers 4 \
+    --timeout-worker-healthcheck 120 --no-access-log
 ```
 
 Binds loopback only. There is no authentication: the loopback bind and the path
 allowlist are the boundary.
+
+**`--timeout-worker-healthcheck` is not optional under `--workers`.** See
+"The supervisor's health ping" below: at uvicorn's default of 5 s, a worker
+saving a large document is killed mid-save.
 
 ## Configuration
 
@@ -154,6 +159,41 @@ A read-only handle cache of 4 documents per worker avoids re-parsing across a
 multi-call sequence. `/doc/annotate` and `/doc/to-markdown` never use it —
 annotations accumulate on a reused handle, and `to_markdown` bakes the
 document.
+
+### The supervisor's health ping
+
+uvicorn ≥ 0.30 runs `--workers N` under a supervisor that pings every worker
+over a pipe each 0.5 s and **SIGKILLs any that does not answer within
+`--timeout-worker-healthcheck` seconds** (default 5), logging only
+`Child process [pid] died`. The answer comes from a Python thread, which needs
+the GIL — and PyMuPDF holds the GIL for the whole of a long call. On the
+2026-09-03 deployment every `/doc/annotate` on the two largest documents (a
+532-page and a 35 MB PDF, 7–21 s to save) killed its worker, and with it every
+request in flight there. `--workers 1` runs no supervisor, which is why a
+single-worker reproduction succeeds. Pass the flag with a value comfortably
+above the longest single engine call you expect; `tests/test_supervisor.py`
+pins the mechanism.
+
+`/doc/annotate` returns `Document.tobytes()` rather than `save()` into a
+`BytesIO` for the same reason: the file-like path calls back into Python for
+every write and took 3–4× longer on those documents (17.8 s → 6.6 s, 81 s →
+20.6 s). The output is a valid, equivalently rendered PDF but is not
+byte-identical to `save()`'s.
+
+## Process-wide state pymupdf4llm mutates
+
+`import pymupdf4llm` calls `pymupdf.TOOLS.unset_quad_corrections(True)` at
+module level, and `to_markdown` reassigns `pymupdf.table.FLAGS` on every call.
+Both change what `find_tables().extract()` returns — on the 2026-09-03
+deployment, 193 of 669 documents lost the spaces inside table cells
+(`Vessel Name:` → `VesselName:`) in every worker that had not yet served a
+markdown request.
+
+`sidecar/engine_state.py` owns the baseline: it is restored once at import,
+right after pymupdf4llm is imported, and again after every `to_markdown` call
+(which runs in the state its import established). Every other endpoint runs at
+PyMuPDF's own defaults. `tests/test_engine_state.py` pins both, including on a
+page of a real document that shows the defect.
 
 ## Versioning
 

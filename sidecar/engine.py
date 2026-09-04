@@ -18,7 +18,6 @@ Every function here must be called with ``handles.FITZ_LOCK`` held.
 
 from __future__ import annotations
 
-import io
 from typing import Any
 
 import pymupdf
@@ -456,8 +455,15 @@ def annotate(
             annot.set_opacity(item.opacity)
             annot.update()  # builds the appearance stream the viewer renders
 
-        buffer = io.BytesIO()
-        doc.save(buffer, garbage=garbage, deflate=deflate)
-        return buffer.getvalue()
+        # tobytes, NOT save(io.BytesIO()) — the one place this module knowingly
+        # does not reproduce the in-process call.  The file-like path routes
+        # every write through a Python callback and holds the GIL for the whole
+        # call: 17.8 s on prod's 532-page document and 81 s on its 35 MB one,
+        # measured 2026-09-04, long enough for uvicorn's supervisor to SIGKILL
+        # the worker mid-save (tests/test_supervisor.py).  tobytes writes into a
+        # MuPDF buffer instead: 6.6 s and 20.6 s for the same two documents and
+        # the same highlight.  The bytes are NOT identical to save()'s (a few
+        # KB smaller); the caller's render gate compares decoded pixels.
+        return doc.tobytes(garbage=garbage, deflate=deflate)
     finally:
         doc.close()

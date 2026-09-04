@@ -579,3 +579,31 @@ def test_annotate_accepts_an_empty_annotation_list(client, two_page):
         assert doc.page_count == 2
     finally:
         doc.close()
+
+
+@pytest.mark.parametrize(
+    "annotations",
+    [
+        pytest.param([], id="empty-annotation-list"),
+        pytest.param(
+            [{"page": 0, "rects": [[10.0, 10.0, 40.0, 40.0]]}], id="one-annotation"
+        ),
+    ],
+)
+def test_annotate_on_an_encrypted_source_is_a_document_fault(
+    client, encrypted, annotations
+):
+    """§5 B2: one unusable document, one status code.
+
+    An encrypted source opens cleanly and only fails when a page is touched.
+    With an annotation it failed at the page load (400); with an EMPTY list
+    nothing touched a page and it failed at `doc.save()` instead, outside the
+    fault mapping — a 500 for the same document, on the request shape every
+    unresolved-anchor citation sends. Both are 400 now.
+    """
+    response = client.post(
+        "/doc/annotate",
+        json={"path": str(encrypted), "annotations": annotations},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "document"

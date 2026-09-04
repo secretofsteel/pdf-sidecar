@@ -18,12 +18,34 @@ Every function here must be called with ``handles.FITZ_LOCK`` held.
 
 from __future__ import annotations
 
+import contextlib
 import io
-from typing import Any
+from typing import Any, Iterator
 
 import pymupdf
+from fastapi import HTTPException
 
 from .errors import DocumentFault, fault_detail
+
+
+@contextlib.contextmanager
+def _document_faults() -> Iterator[None]:
+    """The 400 mapping, as a block: whatever raises in here is this document's
+    fault, not the service's.
+
+    An ``HTTPException`` passes through **unchanged**.  That clause is what
+    makes the block safe to wrap around code that already speaks the fault
+    taxonomy: a ``DocumentFault`` from ``_page`` must not be re-wrapped into
+    its own detail string, and nothing raised in here may be rewritten into a
+    different status code.
+    """
+    try:
+        yield
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise DocumentFault(fault_detail(exc)) from exc
+
 
 # ---------------------------------------------------------------- page access
 
@@ -440,17 +462,20 @@ def annotate(
             else:
                 items = [pymupdf.Rect(*r) for r in item.rects]
 
-            try:
+            with _document_faults():
                 annot = page.add_highlight_annot(items)
-            except Exception as exc:
-                raise DocumentFault(fault_detail(exc)) from exc
-            if annot is None:
-                # Silent None would ship a PDF whose highlight simply is not
-                # there, with nothing failing anywhere.
-                raise RuntimeError(
-                    f"add_highlight_annot returned None for page {item.page} — "
-                    "rejected geometry"
-                )
+                if annot is None:
+                    # Silent None would ship a PDF whose highlight simply is
+                    # not there, with nothing failing anywhere.  Raised INSIDE
+                    # the mapping: rejected geometry is a property of the
+                    # document, so it leaves by the same 400 door as the
+                    # exception-raising form of the same rejection — the two
+                    # arms of one failure must not answer with different
+                    # status codes.
+                    raise RuntimeError(
+                        f"add_highlight_annot returned None for page {item.page} — "
+                        "rejected geometry"
+                    )
 
             annot.set_colors(stroke=tuple(item.color))  # stroke; fill renders default
             annot.set_opacity(item.opacity)
@@ -468,8 +493,13 @@ def annotate(
         # two saves of the same annotated document differ byte-wise even across
         # fresh processes (annotation ids and dates), so the caller's gate for
         # this leg has always been decoded pixels, never bytes.
-        buffer = io.BytesIO()
-        doc.save(buffer, garbage=garbage, deflate=deflate)
+        with _document_faults():
+            # Inside the mapping: an encrypted source opens and annotates
+            # (with nothing to annotate it even loops zero times) and then
+            # fails HERE, which made the same document answer 400 with an
+            # annotation and 500 without one.
+            buffer = io.BytesIO()
+            doc.save(buffer, garbage=garbage, deflate=deflate)
         return buffer.getvalue()
     finally:
         doc.close()

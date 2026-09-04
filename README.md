@@ -186,17 +186,23 @@ worker alive.
 ## Process-wide state pymupdf4llm mutates
 
 `import pymupdf4llm` calls `pymupdf.TOOLS.unset_quad_corrections(True)` at
-module level, and `to_markdown` reassigns `pymupdf.table.FLAGS` on every call.
-Both change what `find_tables().extract()` returns — on the 2026-09-03
-deployment, 193 of 669 documents lost the spaces inside table cells
-(`Vessel Name:` → `VesselName:`) in every worker that had not yet served a
-markdown request.
+module level, and `to_markdown` reassigns `pymupdf.table.FLAGS` on every call
+(dropping `TEXT_ACCURATE_BBOXES` from PyMuPDF's default). Both change what
+`find_tables().extract()` returns, and three states are therefore possible:
 
-`sidecar/engine_state.py` owns the baseline: it is restored once at import,
-right after pymupdf4llm is imported, and again after every `to_markdown` call
-(which runs in the state its import established). Every other endpoint runs at
-PyMuPDF's own defaults. `tests/test_engine_state.py` pins both, including on a
-page of a real document that shows the defect.
+| state | table cells | shipped as |
+|---|---|---|
+| import-only: `(True, PyMuPDF's FLAGS)` | spaces and dots lost — `VesselName:`, `wwwdatajmagojp` | v0.1.0 (193 of 669 prod documents) |
+| PyMuPDF's defaults: `(False, PyMuPDF's FLAGS)` | underscores displaced — `c 1/okhotsk anl … _` | v0.1.1–v0.1.2 (50 of 669) |
+| **baseline: `(True, to_markdown's FLAGS)`** | intact | v0.1.3 |
+
+The baseline is the state a `to_markdown` call leaves behind, because that is
+where the in-process code this service replaces spent nearly all of its life:
+one long-lived worker imported pymupdf4llm at its first markdown extraction and
+never changed back. `sidecar/engine_state.py` owns it — restored once at
+import, right after pymupdf4llm is imported, and again after every
+`to_markdown` call. `tests/test_engine_state.py` pins all three states on a
+synthetic table and the real defect on a page of a real document.
 
 ## Versioning
 

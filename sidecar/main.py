@@ -45,12 +45,12 @@ from .paths import resolve_allowed
 from . import engine
 from .engine_state import markdown_state, restore_baseline
 
-# `import pymupdf4llm` above has just switched quad corrections off for the
-# whole process (see engine_state.py).  Every endpoint but /doc/to-markdown
-# ports code that ran at PyMuPDF's defaults, so put the process back there
-# before the first request — prod 2026-09-03: 193/669 documents lost the
-# spaces in their table cells until a worker happened to serve one markdown
-# request.
+# `import pymupdf4llm` above has just left the process in the import-only
+# state (quad corrections skipped, PyMuPDF's default table flags), in which
+# table cells lose their spaces — prod 2026-09-03, 193/669 documents.  The
+# read endpoints port code that ran, for nearly all of its life, in the state
+# a to_markdown call leaves behind; put the process there before the first
+# request (engine_state.py says why that state, and not PyMuPDF's defaults).
 restore_baseline()
 
 logging.basicConfig(
@@ -215,8 +215,8 @@ def doc_to_markdown(body: ToMarkdownBody) -> dict[str, str]:
         raise LayoutCanaryTripped(f"pymupdf._get_layout is {canary}")
 
     with FITZ_LOCK:
-        # The state to_markdown's own import established, restored afterwards
-        # (engine_state.py) — this call mutates pymupdf.table.FLAGS too.
+        # to_markdown sets the baseline state itself; the exit restores it
+        # regardless of what the call did (engine_state.py).
         with markdown_state():
             try:
                 # The PATH, never a cached Document: to_markdown calls doc.bake().

@@ -115,7 +115,7 @@ All are `POST` with a JSON body except `/health`. Every one takes an absolute
 | endpoint | returns |
 |---|---|
 | `GET /health` | service, engine and configuration facts |
-| `/doc/info` | `{page_count, is_encrypted, needs_pass}` |
+| `/doc/info` | `{page_count, is_encrypted, needs_pass, ocg_count}` |
 | `/doc/text-pages` | `{rows: [{page, text} \| {page, error}]}` for the requested pages |
 | `/doc/search` | `{rows: [...]}`; page-major, needle-minor, stops at the first hit |
 | `/doc/page-words` | `get_text("words")` rows, verbatim 8-element |
@@ -123,7 +123,47 @@ All are `POST` with a JSON body except `/health`. Every one takes an absolute
 | `/doc/page-data` | a part-selectable per-page payload (text, blocks, dict blocks, tables, clusters, drawings, images, scan facts) |
 | `/doc/render` | PNG bytes; a `get_pixmap` passthrough |
 | `/doc/to-markdown` | `{markdown}` via pymupdf4llm's free legacy parser |
-| `/doc/annotate` | annotated PDF bytes |
+| `/doc/annotate` | annotated PDF bytes — the whole document, or a page window (below) |
+
+`ocg_count` is the number of optional-content groups the document declares.
+It is a count, not a verdict; see "Page-scoped excerpts" for what makes it
+worth reporting.
+
+### Page-scoped excerpts
+
+`/doc/annotate` takes an optional `page_range: {start, end}` — inclusive,
+0-based, in SOURCE page numbers. Given one, the service copies that window
+into a fresh document, stamps the highlights on the copy (annotation `page`
+values stay in source coordinates on the wire and are shifted here), and saves
+that instead of the whole publication. On a 532-page source this is the
+difference between an 18-second, 46 MB response and a millisecond-scale one.
+
+Three headers ride on **every** `/doc/annotate` response, range or no range,
+so a caller never has to branch on their presence:
+
+| header | meaning |
+|---|---|
+| `X-Pdf-Sidecar-Excerpt-Start` | 0-based source page the output begins at |
+| `X-Pdf-Sidecar-Excerpt-Count` | pages in the returned document |
+| `X-Pdf-Sidecar-Total-Pages` | pages in the source document |
+
+The range-less form answers `(0, n, n)`. `count == total` therefore means "you
+are holding the whole document".
+
+Four rules constrain a range. Three are decided from the request alone and
+answer `422 {"error": "contract"}`: `start <= end`, at most
+`MAX_PAGES_PER_REQUEST` pages, and every annotation page inside the window.
+The fourth — `end` past the last page — cannot be, because the request does
+not say how long the document is; it is checked after the document is opened
+and answers 422 as well. It is a contract fault rather than a document fault
+because the document is fine: `insert_pdf` would have CLAMPED such a range and
+returned a plausible one-page excerpt for a window nobody asked for.
+
+**Excerpts drop `/OCProperties`.** `insert_pdf` does not carry the
+optional-content dictionary into the copy, so an excerpt of a document that
+hides a layer renders that layer. Callers that care must read `ocg_count` from
+`/doc/info` and keep such documents on the whole-document path — the service
+reports the count and takes no view.
 
 ### Faults
 
@@ -220,3 +260,10 @@ status code increments it, in this repo and in the caller, in one change set.
 venv/bin/pip install -r requirements-dev.txt
 venv/bin/python -m pytest
 ```
+
+**The caller's version pin and this checkout move together.** The application
+pins `SIDECAR_CONTRACT` and `SIDECAR_VERSION` and asserts both at test-session
+start, so the moment its pin moves, its whole PDF suite errors until this
+checkout is moved to the matching tag — and the reverse, a sidecar rolled
+forward under an unmoved pin, fails the same way. Move the pair, in that
+order: tag the release here first, then move the pin there.

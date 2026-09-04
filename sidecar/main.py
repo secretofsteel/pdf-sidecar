@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+from pathlib import Path
 
 # Set before pymupdf4llm is imported: on import it prints a one-line
 # recommendation for the commercial layout package to stdout, which has no
@@ -236,6 +238,14 @@ def doc_to_markdown(body: ToMarkdownBody) -> dict[str, str]:
     return {"markdown": markdown if isinstance(markdown, str) else ""}
 
 
+def _size_mb(path: Path) -> float:
+    """Source size for the log line — never a reason to fail a served request."""
+    try:
+        return os.stat(path).st_size / 1e6
+    except OSError:
+        return -1.0
+
+
 @app.post("/doc/annotate")
 def doc_annotate(body: AnnotateBody) -> Response:
     path = resolve_allowed(body.path)
@@ -244,6 +254,39 @@ def doc_annotate(body: AnnotateBody) -> Response:
             raise ContractFault(f"page {item.page}: exactly one of quads / rects")
         if not (item.quads or item.rects):
             raise ContractFault(f"page {item.page}: empty geometry list")
+
+    source_mb = _size_mb(path)
+    started = time.perf_counter()
     with FITZ_LOCK:
-        pdf = engine.annotate(str(path), body.annotations, body.garbage, body.deflate)
-    return Response(content=pdf, media_type="application/pdf")
+        pdf, excerpt = engine.annotate(
+            str(path),
+            body.annotations,
+            body.garbage,
+            body.deflate,
+            body.page_range,
+        )
+    # The line the annotate timeout gets retuned from: what was asked for, how
+    # much of the source it cost, and how much came back.
+    LOGGER.info(
+        "/doc/annotate mode=%s page_range=%s source_mb=%.2f output_mb=%.2f "
+        "elapsed_ms=%.1f",
+        "full" if body.page_range is None else "excerpt",
+        "none"
+        if body.page_range is None
+        else f"{body.page_range.start}-{body.page_range.end}",
+        source_mb,
+        len(pdf) / 1e6,
+        (time.perf_counter() - started) * 1000.0,
+    )
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        # On EVERY response, excerpt or not. The caller cannot open the PDF to
+        # find out where it sits in the publication, and the range-less form
+        # answers (0, n, n) precisely so it never has to branch on presence.
+        headers={
+            "X-Pdf-Sidecar-Excerpt-Start": str(excerpt["start"]),
+            "X-Pdf-Sidecar-Excerpt-Count": str(excerpt["count"]),
+            "X-Pdf-Sidecar-Total-Pages": str(excerpt["total_pages"]),
+        },
+    )

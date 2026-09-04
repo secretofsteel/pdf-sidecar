@@ -607,3 +607,246 @@ def test_annotate_on_an_encrypted_source_is_a_document_fault(
     )
     assert response.status_code == 400
     assert response.json()["error"] == "document"
+
+
+# ------------------------------------------- /doc/annotate — page_range (D3)
+
+EXCERPT_HEADERS = (
+    "X-Pdf-Sidecar-Excerpt-Start",
+    "X-Pdf-Sidecar-Excerpt-Count",
+    "X-Pdf-Sidecar-Total-Pages",
+)
+
+
+def _annot_kinds_per_page(pdf_bytes):
+    """Annotation types per page index, over EVERY page of the document.
+
+    `page` is bound before its annots are read: an annot must not outlive the
+    Page it came from, and `doc[k].annots()` makes that page a temporary.
+    """
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        out = {}
+        for index in range(doc.page_count):
+            page = doc[index]
+            out[index] = [annot.type[1] for annot in page.annots()]
+        return out
+    finally:
+        doc.close()
+
+
+def test_page_range_serves_the_window_and_reports_it(client, ten_page):
+    """T-A1 — the whole shape of an excerpt, in one request.
+
+    The source annotation is on page 4; the window is 3..5; so the highlight
+    must come back on OUTPUT page 1 and nowhere else. Every output page is
+    inspected rather than page 1 alone — an off-by-one would otherwise
+    IndexError instead of saying where the annotation actually landed.
+    """
+    response = client.post(
+        "/doc/annotate",
+        json={
+            "path": str(ten_page),
+            "annotations": [{"page": 4, "quads": _quads_for(ten_page, "non-conformities", page=4)}],
+            "page_range": {"start": 3, "end": 5},
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+
+    assert response.headers["X-Pdf-Sidecar-Excerpt-Start"] == "3"
+    assert response.headers["X-Pdf-Sidecar-Total-Pages"] == "10"
+
+    doc = pymupdf.open(stream=response.content, filetype="pdf")
+    try:
+        served_pages = doc.page_count
+    finally:
+        doc.close()
+    # The count header describes the BYTES that came back, not the request.
+    assert served_pages == int(response.headers["X-Pdf-Sidecar-Excerpt-Count"])
+    assert served_pages == 5 - 3 + 1
+
+    assert _annot_kinds_per_page(response.content) == {0: [], 1: ["Highlight"], 2: []}
+
+
+@pytest.mark.parametrize(
+    "annotations",
+    [
+        pytest.param([], id="empty-annotation-list"),
+        pytest.param("one", id="one-annotation"),
+    ],
+)
+def test_the_range_less_form_reports_the_whole_document(client, ten_page, annotations):
+    """The (0, n, n) passthrough, on both request shapes.
+
+    A caller that never asks for a range still gets the three headers, so it
+    never has to branch on their presence — and `count == total` is how it
+    knows it is holding the whole publication.
+    """
+    if annotations == "one":
+        annotations = [
+            {"page": 4, "quads": _quads_for(ten_page, "non-conformities", page=4)}
+        ]
+    response = client.post(
+        "/doc/annotate", json={"path": str(ten_page), "annotations": annotations}
+    )
+    assert response.status_code == 200
+    assert [response.headers[h] for h in EXCERPT_HEADERS] == ["0", "10", "10"]
+
+    doc = pymupdf.open(stream=response.content, filetype="pdf")
+    try:
+        assert doc.page_count == 10
+    finally:
+        doc.close()
+
+
+def test_an_annotation_outside_the_range_is_a_contract_fault(client, ten_page):
+    """T-A3 — refused, not silently dropped and not stamped on a wrong page."""
+    response = client.post(
+        "/doc/annotate",
+        json={
+            "path": str(ten_page),
+            "annotations": [{"page": 7, "rects": [[10.0, 10.0, 40.0, 40.0]]}],
+            "page_range": {"start": 3, "end": 5},
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["error"] == "contract"
+    assert "outside" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "page_range, why",
+    [
+        pytest.param({"start": 5, "end": 3}, "reversed", id="reversed"),
+        pytest.param({"start": 0, "end": 32}, "oversize", id="oversize"),
+        pytest.param({"start": -1, "end": 2}, "negative", id="negative"),
+    ],
+)
+def test_page_range_rules_pydantic_can_decide_are_422(client, ten_page, page_range, why):
+    """T-A8, the request-only half — refused before the document is opened."""
+    response = client.post(
+        "/doc/annotate",
+        json={"path": str(ten_page), "annotations": [], "page_range": page_range},
+    )
+    assert response.status_code == 422, why
+    assert response.json()["error"] == "contract"
+
+
+def test_a_past_the_end_range_is_422_from_the_engine_not_400(client, ten_page):
+    """T-A8's other half: the rule pydantic cannot see, and its status code.
+
+    `insert_pdf` CLAMPS a past-the-end range — 8..12 on ten pages returns one
+    page — so without this check the caller gets a plausible one-page excerpt
+    for a window it never asked for. It is 422 and not 400 because the
+    document is fine; the request is not. The detail names the page count,
+    which is what proves the ENGINE check fired rather than a pydantic rule.
+    """
+    response = client.post(
+        "/doc/annotate",
+        json={
+            "path": str(ten_page),
+            "annotations": [],
+            "page_range": {"start": 8, "end": 12},
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["error"] == "contract"
+    assert "10-page document" in response.json()["detail"]
+
+
+def test_excerpt_pages_render_identically_to_their_source_pages(client, ten_page):
+    """T-A12 / R3 — saved-vs-saved, across a rotation and a crop box.
+
+    Both sides come back from `/doc/annotate` with the SAME annotation, so the
+    only difference under test is `insert_pdf` plus the page-start shift.
+    Comparing the excerpt against the source FILE would compare a saved
+    document against an unsaved one and fold a second variable in.
+    """
+    annotations = [
+        {"page": 4, "quads": _quads_for(ten_page, "non-conformities", page=4)}
+    ]
+    excerpt = client.post(
+        "/doc/annotate",
+        json={
+            "path": str(ten_page),
+            "annotations": annotations,
+            "page_range": {"start": 3, "end": 5},
+        },
+    )
+    whole = client.post(
+        "/doc/annotate", json={"path": str(ten_page), "annotations": annotations}
+    )
+
+    served = pymupdf.open(stream=excerpt.content, filetype="pdf")
+    full = pymupdf.open(stream=whole.content, filetype="pdf")
+    try:
+        # Prove the fixture's odd pages are inside the window before comparing
+        # them — three upright A4 pages would agree about nothing.
+        assert served[1].rotation == 90, "the rotated source page must be in the window"
+        assert tuple(served[2].cropbox) != tuple(served[0].cropbox), "…and the crop"
+
+        for index in range(served.page_count):
+            mine = served[index].get_pixmap(dpi=110)
+            theirs = full[3 + index].get_pixmap(dpi=110)
+            assert (mine.width, mine.height) == (theirs.width, theirs.height)
+            assert mine.samples == theirs.samples, (
+                f"excerpt page {index} does not render as source page {3 + index}"
+            )
+    finally:
+        served.close()
+        full.close()
+
+
+def test_a_range_over_a_broken_page_tree_is_a_document_fault(client, mixed_pages):
+    """T-A16 — the `insert_pdf` wrap.
+
+    This document saves cleanly whole (that is why the pre-pass could not test
+    the wrap with it): the RuntimeError code=7 comes out of the page COPY, and
+    without the wrap it would be a 500 on a document the caller already knows
+    how to degrade around.
+    """
+    response = client.post(
+        "/doc/annotate",
+        json={
+            "path": str(mixed_pages),
+            "annotations": [],
+            "page_range": {"start": 0, "end": 1},
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "document"
+
+
+def test_a_range_over_an_encrypted_source_is_a_document_fault(client, encrypted):
+    """The pre-pass made this 400 at the save; under a range it fails earlier,
+    in `insert_pdf`, and must not regress to a 500 on the way."""
+    response = client.post(
+        "/doc/annotate",
+        json={
+            "path": str(encrypted),
+            "annotations": [],
+            "page_range": {"start": 0, "end": 1},
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "document"
+
+
+def test_annotate_logs_the_mode_and_the_sizes(client, ten_page, caplog):
+    """The line §10.4 retunes READ_TIMEOUT_ANNOTATE from a week of."""
+    with caplog.at_level("INFO", logger="sidecar"):
+        client.post(
+            "/doc/annotate",
+            json={
+                "path": str(ten_page),
+                "annotations": [],
+                "page_range": {"start": 3, "end": 5},
+            },
+        )
+    line = next(
+        r.getMessage() for r in caplog.records if "/doc/annotate" in r.getMessage()
+    )
+    assert "mode=excerpt" in line and "page_range=3-5" in line
+    for field in ("source_mb=", "output_mb=", "elapsed_ms="):
+        assert field in line

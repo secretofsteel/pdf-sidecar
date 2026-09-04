@@ -133,6 +133,29 @@ def table_fixture(root: Path) -> Path:
 
 
 @pytest.fixture(scope="session")
+def ten_page(root: Path) -> Path:
+    """Ten distinguishable pages, one ROTATED and one CROPPED.
+
+    Every excerpt test runs on this one document, and the two odd pages sit at
+    4 and 5 — inside the {3, 5} window those tests use. A copy that silently
+    normalised page geometry would still produce three pages with the right
+    headers; it could not produce three pages that RENDER like their sources.
+    """
+    doc = pymupdf.open()
+    for index in range(10):
+        page = doc.new_page(width=595, height=842)
+        page.insert_textbox(
+            pymupdf.Rect(50, 50, 545, 780),
+            "The Company shall establish procedures for reporting "
+            f"non-conformities on page {index}.",
+            fontsize=14,
+        )
+    doc[4].set_rotation(90)
+    doc[5].set_cropbox(pymupdf.Rect(30, 40, 500, 700))
+    return _write(doc, root / "ten_page.pdf")
+
+
+@pytest.fixture(scope="session")
 def encrypted(root: Path) -> Path:
     """Opens cleanly, reports needs_pass, and fails on every page load."""
     doc = pymupdf.open()

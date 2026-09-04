@@ -10,7 +10,56 @@ import pytest
 
 def test_info_reports_page_count_and_flags(client, two_page):
     body = client.post("/doc/info", json={"path": str(two_page)}).json()
-    assert body == {"page_count": 2, "is_encrypted": False, "needs_pass": False}
+    assert body == {
+        "page_count": 2,
+        "is_encrypted": False,
+        "needs_pass": False,
+        "ocg_count": 0,
+    }
+
+
+def test_info_counts_optional_content_groups(client, root):
+    """A field that can only ever be 0 is not evidence that it is wired.
+
+    It exists because `insert_pdf` does not carry `/OCProperties` into a copy:
+    an excerpt of this fixture renders the layer the source hides, which is
+    why the caller keeps such documents on the whole-document path. Asserted
+    here so the count and the reveal stay pinned together.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page()
+    hidden = doc.add_ocg("HiddenLayer", on=False)
+    page.insert_text((72, 120), "VISIBLE baseline text", fontsize=13)
+    page.insert_text((72, 160), "HIDDEN layer text", fontsize=13, oc=hidden)
+    path = root / "one_ocg.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    assert client.post("/doc/info", json={"path": str(path)}).json()["ocg_count"] == 1
+
+    source = pymupdf.open(str(path))
+    excerpt = pymupdf.open()
+    try:
+        excerpt.insert_pdf(source, from_page=0, to_page=0)
+        assert "HIDDEN" not in source[0].get_text()
+        assert "HIDDEN" in excerpt[0].get_text(), "the reveal this count guards"
+        assert len(excerpt.get_ocgs()) == 0
+    finally:
+        excerpt.close()
+        source.close()
+
+
+@pytest.mark.parametrize("kind", ["encrypted", "mixed_pages"])
+def test_info_counts_ocgs_on_the_fault_fixtures_too(client, request, kind):
+    """get_ocgs() must not turn a document /doc/info answers today into a 400.
+
+    An encrypted document and a broken page tree both open and both answer
+    `{}` — the count is read off the document, not off its pages.
+    """
+    path = request.getfixturevalue(kind)
+    response = client.post("/doc/info", json={"path": str(path)})
+    assert response.status_code == 200
+    assert response.json()["ocg_count"] == 0
 
 
 def test_info_opens_an_encrypted_document_and_reports_needs_pass(client, encrypted):

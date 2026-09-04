@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # The client windows every multi-page request at 32 (SIDECAR_PAGE_WINDOW), and
 # /doc/page-data's contract caps it explicitly.  Enforcing it server-side too
@@ -92,6 +92,18 @@ class Annotation(_Body):
     opacity: float = Field(default=0.4, ge=0.0, le=1.0)
 
 
+class PageRange(_Body):
+    """An inclusive, 0-based window of SOURCE pages to excerpt.
+
+    A nested model rather than two flat fields, so ``extra='forbid'`` reaches
+    inside it: a caller sending ``{"start": 3, "stop": 5}`` is refused rather
+    than silently served the single page 3.
+    """
+
+    start: PageIndex
+    end: PageIndex
+
+
 class AnnotateBody(DocBody):
     # An EMPTY list is legal and must stay so: the caller re-saves the document
     # unconditionally after annotating, so every request whose anchors all
@@ -101,3 +113,41 @@ class AnnotateBody(DocBody):
     annotations: list[Annotation]
     garbage: int = 3
     deflate: bool = True
+    # Absent = the whole document, which is what every caller sent before
+    # contract 2 and what a document with optional-content layers still sends.
+    page_range: PageRange | None = None
+
+    @model_validator(mode="after")
+    def _page_range_is_answerable(self) -> "AnnotateBody":
+        """The three range rules that can be decided from the request alone.
+
+        The fourth — ``end < page_count`` — cannot: pydantic never opens the
+        document, and ``insert_pdf`` does not refuse a past-the-end range, it
+        CLAMPS, so ``8..12`` on a ten-page document would come back as one
+        page with nothing anywhere reporting a problem. That one is checked in
+        ``engine.annotate`` instead.
+
+        All three are cross-field and therefore model-level, so their 422
+        detail reads ``": Value error, <message>"`` with an empty field path.
+        That is the shape, not a bug to chase into a field validator; the
+        status and the ``contract`` slug are what the caller branches on.
+        """
+        window = self.page_range
+        if window is None:
+            return self
+        if window.start > window.end:
+            raise ValueError(
+                f"page_range: start {window.start} is after end {window.end}"
+            )
+        if window.end - window.start + 1 > MAX_PAGES_PER_REQUEST:
+            raise ValueError(
+                f"page_range: {window.end - window.start + 1} pages requested, "
+                f"at most {MAX_PAGES_PER_REQUEST} per request"
+            )
+        for item in self.annotations:
+            if not window.start <= item.page <= window.end:
+                raise ValueError(
+                    f"page_range: annotation page {item.page} is outside "
+                    f"{window.start}..{window.end}"
+                )
+        return self

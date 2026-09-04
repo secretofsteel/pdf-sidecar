@@ -8,11 +8,17 @@ lets the caller decide what they mean.  See README.md for why it exists.
 # else — no `git describe` at runtime.
 #
 # Release ritual: bump this constant -> commit -> tag `v<x.y.z>` on that commit.
-# tests/test_version.py asserts the constant matches the tag (leading `v`
-# stripped) and skips, loudly and by name, when HEAD carries no tag.
-SIDECAR_VERSION = "0.1.3"
+# tests/test_service.py::test_version_constant_matches_the_git_tag asserts the
+# constant matches the tag (leading `v` stripped) and skips, loudly and by
+# name, when HEAD carries no tag. (There is no tests/test_version.py; this
+# comment named one for three releases.)
+SIDECAR_VERSION = "0.1.4"
 
 # Wire-contract version.  Any wire-shape change — a field added, removed or
 # retyped, or a status code changed — increments this in BOTH repos in one
 # change set, and the app's deploy gate compares equality.
-SIDECAR_CONTRACT = 1
+#
+# 2: /doc/annotate takes an optional page_range and answers with the three
+#    X-Pdf-Sidecar-Excerpt-*/Total-Pages headers on every response;
+#    /doc/info gains ocg_count.
+SIDECAR_CONTRACT = 2

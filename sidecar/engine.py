@@ -25,7 +25,7 @@ from typing import Any, Iterator
 import pymupdf
 from fastapi import HTTPException
 
-from .errors import DocumentFault, fault_detail
+from .errors import ContractFault, DocumentFault, fault_detail
 
 
 @contextlib.contextmanager
@@ -71,6 +71,16 @@ def info(doc: pymupdf.Document) -> dict[str, Any]:
         "is_encrypted": bool(doc.is_encrypted),
         # needs_pass is an int (0/1) on 1.28.2, not a bool.
         "needs_pass": bool(doc.needs_pass),
+        # How many optional-content groups the document declares. It is a
+        # COUNT, not a verdict: the caller decides what to do with it. What
+        # makes it worth reporting is that `insert_pdf` does not carry
+        # /OCProperties into the copy, so an excerpt of a document that hides
+        # a layer RENDERS that layer (measured on a one-OCG fixture: source
+        # "VISIBLE", excerpt "VISIBLE\nHIDDEN").
+        #
+        # Safe on the fault fixtures — an encrypted document and a broken page
+        # tree both answer {} — and it does not dirty the cached handle.
+        "ocg_count": len(doc.get_ocgs()),
     }
 
 
@@ -436,22 +446,66 @@ def render(
 
 
 def annotate(
-    path: str, annotations: list[Any], garbage: int, deflate: bool
-) -> bytes:
-    """Highlight and save, on a private handle.
+    path: str,
+    annotations: list[Any],
+    garbage: int,
+    deflate: bool,
+    page_range: Any = None,
+) -> tuple[bytes, dict[str, int]]:
+    """Highlight and save, on a private handle; optionally only a page window.
 
     The handle must be private: annotations accumulate on a reused one, so the
     second call on a cached handle would return a document carrying the first
     call's highlights too.
+
+    With ``page_range``, the window is copied into a FRESH document and the
+    highlights are stamped on the copy, so what gets saved is three pages
+    rather than a 532-page publication. Annotation pages are addressed in
+    SOURCE coordinates on the wire and shifted by ``start`` here — the caller
+    never has to know which document its rects ended up on.
+
+    Returns the bytes and ``{start, count, total_pages}``: where the output
+    begins in the source, how many pages it actually has (read from the
+    OUTPUT document, not computed from the request), and how long the source
+    is. The range-less form returns ``(0, n, n)`` — the same three facts, and
+    the reason every response can carry them.
     """
     try:
-        doc = pymupdf.open(path)
+        src = pymupdf.open(path)
     except Exception as exc:
         raise DocumentFault(fault_detail(exc)) from exc
 
+    total_pages = src.page_count
+    out: pymupdf.Document | None = None
+    # Everything below is inside the try/finally that closes `src` — including
+    # the page-count check, which raises.
     try:
+        if page_range is None:
+            doc = src
+            offset = 0
+        else:
+            start, end = page_range.start, page_range.end
+            if end >= total_pages:
+                # The one range rule the request alone cannot answer. It is a
+                # CONTRACT fault, not a document fault: the document is fine,
+                # the caller asked for pages it does not have. `insert_pdf`
+                # would have clamped silently and returned one page.
+                raise ContractFault(
+                    f"page_range: end {end} is past the last page of a "
+                    f"{total_pages}-page document"
+                )
+            with _document_faults():
+                # A broken page tree surfaces here as a bare RuntimeError
+                # (code=7) and an encrypted source as a bare ValueError —
+                # neither of which reaches the save leg, which is where the
+                # whole-document form fails on the same documents.
+                out = pymupdf.open()
+                out.insert_pdf(src, from_page=start, to_page=end)
+            doc = out
+            offset = start
+
         for item in annotations:
-            page = _page(doc, item.page)
+            page = _page(doc, item.page - offset)
             if item.quads is not None:
                 # Only four point pairs construct a Quad; a flat 8-sequence
                 # raises, and four bare [x, y] pairs make add_highlight_annot
@@ -500,6 +554,17 @@ def annotate(
             # annotation and 500 without one.
             buffer = io.BytesIO()
             doc.save(buffer, garbage=garbage, deflate=deflate)
-        return buffer.getvalue()
+        # `count` is read off the document that was actually saved, not
+        # computed as end-start+1: the header the caller pins its page numbers
+        # to must describe the bytes it received.
+        meta = {
+            "start": offset,
+            "count": doc.page_count,
+            "total_pages": total_pages,
+        }
+        return buffer.getvalue(), meta
     finally:
-        doc.close()
+        # Both handles are ours; `doc` is an alias for one of them.
+        if out is not None:
+            out.close()
+        src.close()

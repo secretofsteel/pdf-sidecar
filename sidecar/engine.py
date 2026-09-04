@@ -18,6 +18,7 @@ Every function here must be called with ``handles.FITZ_LOCK`` held.
 
 from __future__ import annotations
 
+import io
 from typing import Any
 
 import pymupdf
@@ -455,15 +456,20 @@ def annotate(
             annot.set_opacity(item.opacity)
             annot.update()  # builds the appearance stream the viewer renders
 
-        # tobytes, NOT save(io.BytesIO()) — the one place this module knowingly
-        # does not reproduce the in-process call.  The file-like path routes
-        # every write through a Python callback and holds the GIL for the whole
-        # call: 17.8 s on prod's 532-page document and 81 s on its 35 MB one,
-        # measured 2026-09-04, long enough for uvicorn's supervisor to SIGKILL
-        # the worker mid-save (tests/test_supervisor.py).  tobytes writes into a
-        # MuPDF buffer instead: 6.6 s and 20.6 s for the same two documents and
-        # the same highlight.  The bytes are NOT identical to save()'s (a few
-        # KB smaller); the caller's render gate compares decoded pixels.
-        return doc.tobytes(garbage=garbage, deflate=deflate)
+        # save(io.BytesIO()), exactly as the in-process code did.  v0.1.1
+        # briefly used doc.tobytes() on a measured "3x speed-up" that turned out
+        # to be an artefact: the SECOND save of the same Document is ~3x faster
+        # and a few KB smaller whichever method runs second (fresh process, the
+        # 532-page prod document: first call 17.7–18.2 s and 46,634,138 B by
+        # either method; second call 6.2 s and 46,628,539 B by either).  Both
+        # hold the GIL for the whole call, which is why the production unit
+        # passes --timeout-worker-healthcheck (tests/test_supervisor.py) — that
+        # flag, not the save method, is what keeps the worker alive.  Note that
+        # two saves of the same annotated document differ byte-wise even across
+        # fresh processes (annotation ids and dates), so the caller's gate for
+        # this leg has always been decoded pixels, never bytes.
+        buffer = io.BytesIO()
+        doc.save(buffer, garbage=garbage, deflate=deflate)
+        return buffer.getvalue()
     finally:
         doc.close()

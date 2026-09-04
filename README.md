@@ -78,7 +78,7 @@ venv/bin/pip install -r requirements.txt      # POSIX
 cp .env.example .env        # then set PDF_SIDECAR_ALLOWED_ROOTS (see below)
 
 venv/bin/uvicorn sidecar.main:app --host 127.0.0.1 --port 8077 --workers 4 \
-    --timeout-worker-healthcheck 120 --no-access-log
+    --timeout-worker-healthcheck 300 --no-access-log
 ```
 
 Binds loopback only. There is no authentication: the loopback bind and the path
@@ -168,17 +168,20 @@ over a pipe each 0.5 s and **SIGKILLs any that does not answer within
 `Child process [pid] died`. The answer comes from a Python thread, which needs
 the GIL — and PyMuPDF holds the GIL for the whole of a long call. On the
 2026-09-03 deployment every `/doc/annotate` on the two largest documents (a
-532-page and a 35 MB PDF, 7–21 s to save) killed its worker, and with it every
-request in flight there. `--workers 1` runs no supervisor, which is why a
-single-worker reproduction succeeds. Pass the flag with a value comfortably
-above the longest single engine call you expect; `tests/test_supervisor.py`
+532-page and a 35 MB PDF, 18 s and 84 s to save) killed its worker, and with
+it every request in flight there. `--workers 1` runs no supervisor, which is
+why a single-worker reproduction succeeds. Pass the flag with a value
+comfortably above the longest single engine call you expect — the production
+unit uses 300 s, its reverse proxy's own read timeout; `tests/test_supervisor.py`
 pins the mechanism.
 
-`/doc/annotate` returns `Document.tobytes()` rather than `save()` into a
-`BytesIO` for the same reason: the file-like path calls back into Python for
-every write and took 3–4× longer on those documents (17.8 s → 6.6 s, 81 s →
-20.6 s). The output is a valid, equivalently rendered PDF but is not
-byte-identical to `save()`'s.
+The save method is not a lever. v0.1.1 briefly switched `/doc/annotate` to
+`Document.tobytes()` on a measured "3× speed-up" that was an artefact of
+measuring a *second* save of the same `Document` — which is ~3× faster and a
+few KB smaller whichever method runs second. On a fresh document `tobytes()`
+and `save(BytesIO)` take the same 18 s and produce the same size; v0.1.2
+restored the `save()` call the in-process code made. Only the flag keeps the
+worker alive.
 
 ## Process-wide state pymupdf4llm mutates
 

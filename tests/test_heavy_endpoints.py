@@ -850,3 +850,63 @@ def test_annotate_logs_the_mode_and_the_sizes(client, ten_page, caplog):
     assert "mode=excerpt" in line and "page_range=3-5" in line
     for field in ("source_mb=", "output_mb=", "elapsed_ms="):
         assert field in line
+
+
+# ── 0.1.6: optional-content layers survive an excerpt ─────────────────────────
+
+
+def _layered(root, ambiguous=False):
+    """Three pages; page 1 carries a visible layer and a HIDDEN one (the AHP20
+    shape: a design "Guides and Grids" layer that is OFF by default). With
+    ``ambiguous`` the two groups share a name but not a default state."""
+    doc = pymupdf.open()
+    for i in range(3):
+        doc.new_page().insert_text((72, 100), f"Page {i} body", fontsize=14)
+    hidden = doc.add_ocg("Guides and Grids" if not ambiguous else "Layer", on=False)
+    visible = doc.add_ocg("Layer 1" if not ambiguous else "Layer", on=True)
+    page = doc[1]
+    page.insert_text((72, 200), "VISIBLE LAYER TEXT", fontsize=14, oc=visible)
+    page.insert_text((72, 300), "HIDDEN GRID LINES", fontsize=14, oc=hidden)
+    for k in range(0, 600, 40):
+        page.draw_line((0, k), (600, k), color=(1, 0, 0), width=0.5, oc=hidden)
+    path = root / ("ambiguous.pdf" if ambiguous else "layered.pdf")
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_an_excerpt_keeps_a_hidden_layer_hidden(client, root):
+    """The excerpt page renders pixel-identically to the source page, the
+    hidden group is OFF in the returned document, and its text is not
+    extractable — the R3 case that used to force the whole document."""
+    path = _layered(root)
+    src = pymupdf.open(str(path))
+    reference = src[1].get_pixmap(dpi=72).samples
+    src.close()
+    r = client.post("/doc/annotate", json={
+        "path": str(path), "annotations": [], "page_range": {"start": 0, "end": 1}})
+    assert r.status_code == 200, r.text
+    assert r.headers["X-Pdf-Sidecar-Excerpt-Count"] == "2"
+    out = pymupdf.open(stream=r.content, filetype="pdf")
+    try:
+        groups = out.get_ocgs()
+        assert {g["name"]: g["on"] for g in groups.values()} == {
+            "Guides and Grids": False, "Layer 1": True}
+        assert out[1].get_pixmap(dpi=72).samples == reference
+        assert "HIDDEN" not in out[1].get_text()
+        assert "VISIBLE LAYER TEXT" in out[1].get_text()
+    finally:
+        out.close()
+
+
+def test_an_unmappable_layer_set_serves_the_whole_document(client, root):
+    """Two groups with one name and different default states cannot be told
+    apart after the copy — the safe answer is the whole document, and the
+    headers say so."""
+    path = _layered(root, ambiguous=True)
+    r = client.post("/doc/annotate", json={
+        "path": str(path), "annotations": [], "page_range": {"start": 0, "end": 1}})
+    assert r.status_code == 200, r.text
+    assert (r.headers["X-Pdf-Sidecar-Excerpt-Start"], r.headers["X-Pdf-Sidecar-Excerpt-Count"],
+            r.headers["X-Pdf-Sidecar-Total-Pages"]) == ("0", "3", "3")
+

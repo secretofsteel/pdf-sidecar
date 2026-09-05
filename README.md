@@ -158,7 +158,11 @@ worth reporting.
 into a fresh document, stamps the highlights on the copy (annotation `page`
 values stay in source coordinates on the wire and are shifted here), and saves
 that instead of the whole publication. On a 532-page source this is the
-difference between an 18-second, 46 MB response and a millisecond-scale one.
+difference between an 18-second, 46 MB response and a millisecond-scale one. Optional-content layers keep the source's default visibility in the
+excerpt (`/OCProperties` is rebuilt from the copied groups, 0.1.6); when a
+window's layers cannot be mapped back unambiguously (same name, different
+default states) the whole document is served instead and the headers say so
+(`0 / n / n`).
 
 Three headers ride on **every** `/doc/annotate` response, range or no range,
 so a caller never has to branch on their presence:

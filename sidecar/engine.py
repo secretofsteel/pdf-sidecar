@@ -18,6 +18,8 @@ Every function here must be called with ``handles.FITZ_LOCK`` held.
 
 from __future__ import annotations
 
+import logging
+
 import contextlib
 import io
 from typing import Any, Iterator
@@ -26,6 +28,8 @@ import pymupdf
 from fastapi import HTTPException
 
 from .errors import ContractFault, DocumentFault, fault_detail
+
+LOGGER = logging.getLogger("sidecar")
 
 
 @contextlib.contextmanager
@@ -492,6 +496,56 @@ def render(
 # -------------------------------------------------------------- /doc/annotate
 
 
+
+def _carry_optional_content(src: pymupdf.Document, out: pymupdf.Document) -> bool:
+    """Rebuild ``/OCProperties`` in an excerpt so its layers keep the source's
+    default visibility.
+
+    ``insert_pdf`` copies the OCG objects a page's content references but not
+    the catalog's ``/OCProperties`` (the list of groups and which are OFF by
+    default), so a bare excerpt renders every optional layer — a hidden
+    "Guides and Grids" design layer, a draft watermark. Prod 2026-09-05: 64 of
+    669 library PDFs carry OCGs and were being served whole (82 s for AHP20);
+    only 2 of them actually have a hidden layer.
+
+    Copied groups are matched to source groups by NAME. Returns False when
+    that is ambiguous — the same name with different default states in the
+    source, or a copied group whose name the source does not know — and the
+    caller serves the whole document instead, exactly as before. Returns True
+    when there is nothing to carry.
+    """
+    try:
+        src_groups = src.get_ocgs() or {}
+        if not src_groups:
+            return True
+        states: dict[str, set[bool]] = {}
+        for group in src_groups.values():
+            states.setdefault(str(group.get("name")), set()).add(bool(group.get("on", True)))
+        if any(len(seen) > 1 for seen in states.values()):
+            return False
+        copied: list[tuple[int, str]] = []
+        for xref in range(1, out.xref_length()):
+            try:
+                if out.xref_get_key(xref, "Type") != ("name", "/OCG"):
+                    continue
+                copied.append((xref, str(out.xref_get_key(xref, "Name")[1])))
+            except Exception:
+                continue
+        if not copied:
+            return True
+        if any(name not in states for _xref, name in copied):
+            return False
+        refs = " ".join(f"{xref} 0 R" for xref, _name in copied)
+        offs = " ".join(f"{xref} 0 R" for xref, name in copied if states[name] == {False})
+        out.xref_set_key(
+            out.pdf_catalog(), "OCProperties",
+            f"<< /OCGs [ {refs} ] /D << /OFF [ {offs} ] /Order [ {refs} ] >> >>",
+        )
+        return True
+    except Exception:
+        return False
+
+
 def annotate(
     path: str,
     annotations: list[Any],
@@ -548,8 +602,22 @@ def annotate(
                 # whole-document form fails on the same documents.
                 out = pymupdf.open()
                 out.insert_pdf(src, from_page=start, to_page=end)
-            doc = out
-            offset = start
+            if _carry_optional_content(src, out):
+                doc = out
+                offset = start
+            else:
+                # Layers this window references cannot be mapped back to the
+                # source's default visibility unambiguously: serve the whole
+                # document rather than reveal (or hide) the wrong layer. The
+                # (0, n, n) metadata tells the caller what it got.
+                LOGGER.warning(
+                    "/doc/annotate page_range=%d-%d served WHOLE: optional-content "
+                    "groups could not be carried unambiguously", start, end,
+                )
+                out.close()
+                out = None
+                doc = src
+                offset = 0
 
         for item in annotations:
             page = _page(doc, item.page - offset)

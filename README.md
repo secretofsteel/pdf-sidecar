@@ -96,6 +96,7 @@ saving a large document is killed mid-save.
 | `PDF_SIDECAR_WORKERS` | uvicorn worker processes; reported by `/health` |
 | `PDF_SIDECAR_ALLOWED_ROOTS` | **JSON array of absolute paths.** Every path-valued request field is resolved and containment-checked against these roots. |
 | `TESSDATA_PREFIX` | Directory holding Tesseract's `eng.traineddata`, for `/doc/page-words-ocr`. Unset or wrong → `/health.ocr` false; every other endpoint is unaffected. |
+| `PDF_SIDECAR_OCR_PIXEL_BUDGET` | Most pixels one `/doc/page-words-ocr` render may have (default 20000000). A page over it is OCR'd at the highest dpi that fits; see below. |
 
 `PDF_SIDECAR_ALLOWED_ROOTS` is JSON rather than a separator-joined string
 because a Windows path (`C:/dev/...`) would split on `:`. It is read by systemd's
@@ -127,6 +128,14 @@ distinguishable from their errors alone (the last two are both
 `FzErrorLibrary code=3`). The result is `/health.ocr`, and the false branch
 logs the resolved directory **and** whether `eng.traineddata` is in it, which
 is what actually tells the two apart.
+
+**The pixel budget (0.1.7).** `/doc/page-words-ocr` renders a page at the requested dpi only while the render stays
+within `PDF_SIDECAR_OCR_PIXEL_BUDGET` pixels (20 Mpx); a larger page is rendered at the highest dpi that fits (never
+below 36). A4 and A3 keep 300 dpi (8.7 and 17.4 Mpx); A1 goes to 160 dpi, A0 to 113. Tesseract's time grows with pixels
+and marks, and MuPDF's in-process OCR cannot be interrupted: a speckled A1 scan took 202.9 s at 300 dpi and 22.2 s
+within the budget on the dev box, and on prod (2026-11-07) a page of a vessel manual's scanned appendix held a worker
+past the 300 s healthcheck while the caller, whose read timeout is 10 s, had long given up. Word boxes are in PDF points
+whatever the dpi, so the wire contract is unchanged; a lowered render is logged at INFO.
 
 ## Endpoints
 

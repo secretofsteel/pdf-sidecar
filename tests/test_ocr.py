@@ -216,3 +216,75 @@ def test_health_reports_ocr_true_where_tesseract_actually_works(client):
     """The positive half: a field that is only ever observed false is not
     evidence that the probe can succeed."""
     assert client.get("/health").json()["ocr"] is True
+
+
+# ------------------------------------------------------------ the pixel budget (2026-11-07)
+# A speckled A1 scan took 208.7 s to OCR at 300 dpi on the dev box (16.0 s at 150 dpi); on prod one such page held a
+# worker past the 300 s healthcheck while the caller had long given up.
+
+from sidecar import engine  # noqa: E402
+
+
+@pytest.mark.parametrize("size,expected", [
+    ((595, 842), 300),        # A4: 8.7 Mpx at 300 dpi, within the budget
+    ((842, 1191), 300),       # A3: 17.4 Mpx, within
+    ((1684, 2384), 160),      # A1: 70 Mpx at 300 would be over; 160 dpi fits 20 Mpx
+    ((2384, 3370), 113),      # A0
+])
+def test_the_ocr_dpi_keeps_a4_and_a3_at_the_request_and_fits_larger_pages_to_the_budget(size, expected):
+    got = engine.ocr_dpi(*size, 300, budget=20_000_000)
+    assert abs(got - expected) <= 2, got
+    w_in, h_in = size[0] / 72, size[1] / 72
+    assert (w_in * got) * (h_in * got) <= 20_000_000
+
+
+def test_the_ocr_dpi_never_raises_the_request_and_never_drops_below_the_floor():
+    assert engine.ocr_dpi(595, 842, 150, budget=20_000_000) == 150
+    assert engine.ocr_dpi(100_000, 100_000, 300, budget=20_000_000) == engine.OCR_MIN_DPI
+
+
+def _spy_dpi(monkeypatch):
+    seen = []
+    real = pymupdf.Page.get_textpage_ocr
+
+    def spy(self, *args, **kwargs):
+        seen.append(kwargs.get("dpi"))
+        return real(self, *args, **kwargs)
+    monkeypatch.setattr(pymupdf.Page, "get_textpage_ocr", spy)
+    return seen
+
+
+@pytest.fixture(scope="session")
+def large_scan(root):
+    """An A1 page whose only content is an image of three text lines: a scanned drawing sheet's shape."""
+    typeset = pymupdf.open()
+    page = typeset.new_page(width=1684, height=2384)
+    for index, line in enumerate(SCAN_LINES):
+        page.insert_text((120, 300 + index * 120), line, fontsize=48)
+    pixmap = typeset[0].get_pixmap(dpi=100)
+    scan = pymupdf.open()
+    scanned_page = scan.new_page(width=1684, height=2384)
+    scanned_page.insert_image(scanned_page.rect, pixmap=pixmap)
+    path = root / "large_scan.pdf"
+    scan.save(str(path))
+    scan.close()
+    typeset.close()
+    return path
+
+
+@requires_tessdata
+def test_a_large_page_is_ocrd_within_the_budget_and_its_words_stay_in_points(client, large_scan, monkeypatch):
+    seen = _spy_dpi(monkeypatch)
+    response = _ocr(client, large_scan)
+    assert response.status_code == 200
+    assert seen == [engine.ocr_dpi(1684, 2384, 300)] and seen[0] < 300
+    words = response.json()["words"]
+    assert any(w[4].lower().startswith("scuppers") for w in words), words[:10]
+    assert all(0 <= w[0] < w[2] <= 1684 and 0 <= w[1] < w[3] <= 2384 for w in words)
+
+
+@requires_tessdata
+def test_an_a4_page_is_still_ocrd_at_the_requested_dpi(client, pure_scan, monkeypatch):
+    seen = _spy_dpi(monkeypatch)
+    assert _ocr(client, pure_scan).status_code == 200
+    assert seen == [300]

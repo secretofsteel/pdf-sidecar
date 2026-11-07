@@ -22,6 +22,8 @@ import logging
 
 import contextlib
 import io
+import math
+import os
 from typing import Any, Iterator
 
 import pymupdf
@@ -232,6 +234,23 @@ def ocr_probe() -> None:
         doc.close()
 
 
+# OCR pixel budget (2026-11-07). Tesseract's time grows with pixels and with marks: a speckled A1 scan took 208.7 s at
+# 300 dpi (70 Mpx) and 16.0 s at 150 dpi (17 Mpx) on the dev box, and on prod one such page held a worker past the
+# 300 s healthcheck while the caller had long given up (its read timeout is 10 s). Rendering at no more than this many
+# pixels keeps A4 and A3 at 300 dpi (8.7 and 17.4 Mpx) and brings an A1 page to 160 dpi, an A0 to 113.
+# Word boxes stay in PDF points whatever the dpi, so nothing changes for the caller beyond small print on huge pages.
+OCR_PIXEL_BUDGET = int(os.getenv("PDF_SIDECAR_OCR_PIXEL_BUDGET") or 20_000_000)
+OCR_MIN_DPI = 36
+
+
+def ocr_dpi(width_pt: float, height_pt: float, dpi: int, budget: int = OCR_PIXEL_BUDGET) -> int:
+    """The dpi to OCR a page at: the requested one, or the highest that keeps the render within ``budget`` pixels
+    (never below ``OCR_MIN_DPI``)."""
+    area_in2 = max(width_pt, 1.0) / 72.0 * max(height_pt, 1.0) / 72.0
+    fit = int(math.sqrt(budget / area_in2))
+    return max(OCR_MIN_DPI, min(int(dpi), fit))
+
+
 def page_words_ocr(
     doc: pymupdf.Document, index: int, dpi: int, language: str
 ) -> list[list[Any]]:
@@ -252,7 +271,11 @@ def page_words_ocr(
     degrades quietly on the latter and would silently stop OCR-ing everything.
     """
     page = _page(doc, index)
-    textpage = page.get_textpage_ocr(full=True, dpi=dpi, language=language)
+    effective = ocr_dpi(page.rect.width, page.rect.height, dpi)
+    if effective < dpi:
+        LOGGER.info("OCR page %d at %d dpi instead of %d: %.0f x %.0f pt is over the %d-pixel budget",
+                    index, effective, dpi, page.rect.width, page.rect.height, OCR_PIXEL_BUDGET)
+    textpage = page.get_textpage_ocr(full=True, dpi=effective, language=language)
     return [list(w) for w in page.get_text("words", textpage=textpage)]
 
 

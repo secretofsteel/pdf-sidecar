@@ -438,12 +438,19 @@ def page_data(
         if "tables" in wanted:
             row["tables"] = _tables(page, errors)
         if "clusters" in wanted:
+            # Contract 4: cluster_drawings' default clip is page.rect, the ROTATED rect, while the
+            # drawings it clusters are native — on a rotated page every drawing outside the overlap
+            # of the two was silently dropped. The clip is the unrotated page rect there; an
+            # unrotated page passes no clip, so it runs exactly as before (Multimodal Spec 1).
+            cluster_clip = None if page.rotation == 0 else page.rect * page.derotation_matrix
             row["clusters"] = _part(
                 errors,
                 "clusters",
                 lambda: [
                     list(r)
-                    for r in page.cluster_drawings(x_tolerance=10, y_tolerance=10)
+                    for r in page.cluster_drawings(
+                        clip=cluster_clip, x_tolerance=10, y_tolerance=10
+                    )
                 ],
             )
         if "drawings" in wanted:

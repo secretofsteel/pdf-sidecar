@@ -951,6 +951,33 @@ def test_page_data_reports_rotation_and_matrix(client, rotated_four):
         doc.close()
 
 
+@pytest.fixture(scope="session")
+def low_diagram(root):
+    """A 400x600 page at 0 and at 90 degrees with one diagram at native y 300-590: below the overlap of
+    the native and rotated rects, where cluster_drawings' default clip (the rotated rect) drops it."""
+    doc = pymupdf.open()
+    for rotation in (0, 90):
+        page = doc.new_page(width=400, height=600)
+        page.draw_rect(pymupdf.Rect(40, 300, 360, 590), color=(0, 0, 0), width=2)
+        for i in range(1, 6):
+            y = 300 + i * 290 / 6
+            page.draw_line((50, y), (350, y), color=(0, 0, 0), width=1)
+        page.set_rotation(rotation)
+    path = root / "low_diagram.pdf"
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_page_data_clusters_a_rotated_pages_whole_native_page(client, low_diagram):
+    """Contract 4: the 90-degree page finds the same native cluster as the upright one."""
+    rows = _page_data(client, low_diagram, [0, 1], parts=["clusters"]).json()
+    upright, rotated = rows[0]["clusters"], rows[1]["clusters"]
+    assert len(upright) == 1 and len(rotated) == 1
+    assert rotated[0] == pytest.approx(upright[0])
+    assert upright[0] == pytest.approx([40, 300, 360, 590], abs=2)
+
+
 def test_page_data_images_carry_their_pixel_size(client, rotated_four):
     row = _page_data(client, rotated_four, [1], parts=["images"]).json()[0]
     assert (row["images"][0]["width"], row["images"][0]["height"]) == (40, 40)

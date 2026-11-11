@@ -910,3 +910,99 @@ def test_an_unmappable_layer_set_serves_the_whole_document(client, root):
     assert (r.headers["X-Pdf-Sidecar-Excerpt-Start"], r.headers["X-Pdf-Sidecar-Excerpt-Count"],
             r.headers["X-Pdf-Sidecar-Total-Pages"]) == ("0", "3", "3")
 
+
+
+# ------------------------------------------- contract 4: rotation, image sizes, frames
+
+
+_NATIVE_IMAGE = (100.0, 150.0, 300.0, 350.0)
+
+
+@pytest.fixture(scope="session")
+def rotated_four(root):
+    """Four A4 pages rotated 0 / 90 / 180 / 270, each holding one 40x40 red image placed at the
+    same NATIVE rect — the shape every rotated-page defect in the app's picture crop comes from."""
+    doc = pymupdf.open()
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 40))
+    pix.set_rect(pix.irect, (255, 0, 0))
+    for rotation in (0, 90, 180, 270):
+        page = doc.new_page(width=595, height=842)
+        page.insert_image(pymupdf.Rect(*_NATIVE_IMAGE), pixmap=pix)
+        page.set_rotation(rotation)
+    path = root / "rotated_four.pdf"
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_page_data_reports_rotation_and_matrix(client, rotated_four):
+    rows = _page_data(client, rotated_four, [0, 1, 2, 3], parts=["images"]).json()
+    doc = pymupdf.open(str(rotated_four))
+    try:
+        for row, rotation in zip(rows, (0, 90, 180, 270)):
+            page = doc[row["page"]]
+            assert row["rotation"] == rotation
+            assert row["rotation_matrix"] == pytest.approx(list(page.rotation_matrix))
+            # the native image rect, through the reported matrix, lands inside the rendered page
+            native = pymupdf.Rect(row["images"][0]["rects"][0])
+            rendered = native * pymupdf.Matrix(*row["rotation_matrix"])
+            assert pymupdf.Rect(row["page_rect"]).contains(rendered)
+    finally:
+        doc.close()
+
+
+def test_page_data_images_carry_their_pixel_size(client, rotated_four):
+    row = _page_data(client, rotated_four, [1], parts=["images"]).json()[0]
+    assert (row["images"][0]["width"], row["images"][0]["height"]) == (40, 40)
+
+
+def test_page_data_failed_page_carries_no_rotation(client, encrypted):
+    row = _page_data(client, encrypted, [0], parts=["text"]).json()[0]
+    assert "page" in row["errors"]
+    assert "rotation" not in row and "rotation_matrix" not in row
+
+
+@pytest.mark.parametrize("index", [0, 1, 2, 3])
+def test_annotate_frame_outlines_the_picture_on_a_rotated_page(client, rotated_four, index):
+    """A frame drawn from the NATIVE rect (annotate's own space) outlines the picture where the
+    page shows it: the stroke sits on the rendered box's edge and the picture inside is untinted."""
+    response = client.post(
+        "/doc/annotate",
+        json={"path": str(rotated_four), "annotations": [
+            {"page": index, "rects": [list(_NATIVE_IMAGE)], "style": "frame",
+             "color": [0.0, 0.0, 1.0], "opacity": 1.0, "width": 4.0}]},
+    )
+    assert response.status_code == 200, response.text
+    doc = pymupdf.open(stream=response.content, filetype="pdf")
+    try:
+        page = doc[index]
+        assert [a.type[1] for a in page.annots()] == ["Square"]
+        box = pymupdf.Rect(_NATIVE_IMAGE) * page.rotation_matrix
+        pix = page.get_pixmap(dpi=72)
+        edge = pix.pixel(int((box.x0 + box.x1) / 2), int(box.y0))           # top edge, middle
+        centre = pix.pixel(int((box.x0 + box.x1) / 2), int((box.y0 + box.y1) / 2))
+        assert edge[2] > 200 and edge[0] < 80                                # blue stroke
+        assert centre[0] > 200 and centre[2] < 80                            # red picture, no fill
+    finally:
+        doc.close()
+
+
+def test_annotate_frame_refuses_quads(client, two_page):
+    response = client.post(
+        "/doc/annotate",
+        json={"path": str(two_page), "annotations": [
+            {"page": 0, "quads": _quads_for(two_page, "NEEDLE"), "style": "frame"}]},
+    )
+    assert response.status_code == 422
+
+
+def test_annotate_default_style_is_still_a_highlight(client, two_page):
+    response = client.post(
+        "/doc/annotate",
+        json={"path": str(two_page), "annotations": [{"page": 0, "rects": [[60, 80, 200, 100]]}]},
+    )
+    doc = pymupdf.open(stream=response.content, filetype="pdf")
+    try:
+        assert [a.type[1] for a in doc[0].annots()] == ["Highlight"]
+    finally:
+        doc.close()

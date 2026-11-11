@@ -366,12 +366,15 @@ def _images(page: pymupdf.Page, errors: dict[str, str]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for image in listed:
         xref = image[0]
+        # Contract 4: the image's own pixel size (get_images fields 2 and 3), so a caller rendering
+        # it can stay at or below the pixels it holds.
+        size = {"width": image[2], "height": image[3]}
         try:
             out.append(
-                {"xref": xref, "rects": [list(r) for r in page.get_image_rects(xref)]}
+                {"xref": xref, "rects": [list(r) for r in page.get_image_rects(xref)], **size}
             )
         except Exception as exc:
-            out.append({"xref": xref, "rects": None, "error": fault_detail(exc)})
+            out.append({"xref": xref, "rects": None, "error": fault_detail(exc), **size})
     return out
 
 
@@ -411,7 +414,15 @@ def page_data(
             out.append(row)
             continue
 
-        row = {"page": pno, "page_rect": page_rect}
+        # Contract 4: every loaded page reports its rotation and MuPDF's own rotation matrix
+        # (native page space -> the rendered page, the space `render`'s clip uses). The caller
+        # converts boxes with it; this service decides nothing about them.
+        row = {
+            "page": pno,
+            "page_rect": page_rect,
+            "rotation": page.rotation,
+            "rotation_matrix": list(page.rotation_matrix),
+        }
 
         if "text" in wanted:
             # DEFAULT flags, matching the in-process bare call.
@@ -655,6 +666,23 @@ def annotate(
                 items = [pymupdf.Rect(*r) for r in item.rects]
 
             with _document_faults():
+                if getattr(item, "style", "highlight") == "frame":
+                    # Contract 4: one outline per rect, no fill — marks a box without tinting it.
+                    annot = None
+                    for rect in items:
+                        annot = page.add_rect_annot(rect)
+                        if annot is None:
+                            break
+                        annot.set_border(width=item.width)
+                        annot.set_colors(stroke=tuple(item.color))
+                        annot.set_opacity(item.opacity)
+                        annot.update()
+                    if annot is None:
+                        raise RuntimeError(
+                            f"add_rect_annot returned None for page {item.page} — "
+                            "rejected geometry"
+                        )
+                    continue
                 annot = page.add_highlight_annot(items)
                 if annot is None:
                     # Silent None would ship a PDF whose highlight simply is

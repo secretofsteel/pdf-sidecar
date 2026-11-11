@@ -160,6 +160,18 @@ All are `POST` with a JSON body except `/health`. Every one takes an absolute
 It is a count, not a verdict; see "Page-scoped excerpts" for what makes it
 worth reporting.
 
+**Geometry spaces (contract 4).** Every loaded `/doc/page-data` row carries
+`rotation` and `rotation_matrix` (MuPDF's `page.rotation_matrix`). The row's
+parts — words, blocks, tables, clusters, image rects — are in the page's
+*native* (unrotated) space, as MuPDF returns them; `page_rect` and
+`/doc/render`'s `clip` are in the *rendered* (rotated) space. A caller that
+crops a part's box multiplies it by `rotation_matrix` first. The service
+converts nothing. The `images` part also carries each image's pixel `width`
+and `height`. `/doc/annotate` takes, per annotation, `style: "highlight"` (the
+default) or `"frame"` — a rectangle outline with no fill, from `rects` only —
+and a `width` for the frame's stroke; annotation geometry is native space,
+like the search quads it is usually built from.
+
 ### Page-scoped excerpts
 
 `/doc/annotate` takes an optional `page_range: {start, end}` — inclusive,

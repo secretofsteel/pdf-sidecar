@@ -109,6 +109,10 @@ class Annotation(_Body):
     rects: list[Annotated[list[float], Field(min_length=4, max_length=4)]] | None = None
     color: Annotated[list[float], Field(min_length=3, max_length=3)] = [1.0, 0.92, 0.23]
     opacity: float = Field(default=0.4, ge=0.0, le=1.0)
+    # Contract 4: "highlight" (the default, every existing caller) or "frame" — a rectangle outline
+    # with no fill, for marking a picture's box without tinting it. A frame takes rects only.
+    style: Literal["highlight", "frame"] = "highlight"
+    width: float = Field(default=1.5, gt=0.0, le=20.0)
 
 
 class PageRange(_Body):

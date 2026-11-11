@@ -160,6 +160,23 @@ All are `POST` with a JSON body except `/health`. Every one takes an absolute
 It is a count, not a verdict; see "Page-scoped excerpts" for what makes it
 worth reporting.
 
+**Geometry spaces (contract 4).** Every loaded `/doc/page-data` row carries
+`rotation` and `rotation_matrix` (MuPDF's `page.rotation_matrix`). The row's
+parts — words, blocks, dict blocks, drawings, clusters, image rects — are in
+the page's *native* (unrotated) space, as MuPDF returns them; `page_rect` and
+`/doc/render`'s `clip` are in the *rendered* (rotated) space. **One exception,
+MuPDF's own:** `find_tables` works on the rotated page, so a `tables` bbox (and
+its cells) is in the *rendered* space; the caller converts it to native with
+the inverse matrix. A caller that crops a native box multiplies it by
+`rotation_matrix` first. The service converts nothing. On a rotated page the
+`clusters` part clips by the *unrotated* page rect (MuPDF's default clip is the
+rotated rect, which dropped every drawing outside the overlap of the two); an
+unrotated page passes no clip. The `images` part also carries each image's pixel `width`
+and `height`. `/doc/annotate` takes, per annotation, `style: "highlight"` (the
+default) or `"frame"` — a rectangle outline with no fill, from `rects` only —
+and a `width` for the frame's stroke; annotation geometry is native space,
+like the search quads it is usually built from.
+
 ### Page-scoped excerpts
 
 `/doc/annotate` takes an optional `page_range: {start, end}` — inclusive,

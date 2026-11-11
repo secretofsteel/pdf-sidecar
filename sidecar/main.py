@@ -325,6 +325,8 @@ def doc_annotate(body: AnnotateBody) -> Response:
             raise ContractFault(f"page {item.page}: exactly one of quads / rects")
         if not (item.quads or item.rects):
             raise ContractFault(f"page {item.page}: empty geometry list")
+        if item.style == "frame" and item.rects is None:
+            raise ContractFault(f"page {item.page}: a frame takes rects, not quads")
 
     source_mb = _size_mb(path)
     started = time.perf_counter()

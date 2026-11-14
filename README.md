@@ -148,7 +148,7 @@ All are `POST` with a JSON body except `/health`. Every one takes an absolute
 | `/doc/info` | `{page_count, is_encrypted, needs_pass, ocg_count}` |
 | `/doc/text-pages` | `{rows: [{page, text} \| {page, error}]}` for the requested pages |
 | `/doc/search` | `{rows: [...]}`; page-major, needle-minor, stops at the first hit |
-| `/doc/page-words` | `get_text("words")` rows, verbatim 8-element |
+| `/doc/page-words` | `get_text("words")` rows, verbatim 8-element, plus `render_modes` (contract 5): one entry per row, the majority text render mode of the traced characters in that word's box (0 fill, 1 stroke, 3 invisible, ...), or `null` when none |
 | `/doc/page-blocks` | text blocks as `{bbox, text}` |
 | `/doc/page-words-ocr` | the same 8-element rows, from a **Tesseract** textpage — words on pages that carry no glyphs |
 | `/doc/page-data` | a part-selectable per-page payload (text, blocks, dict blocks, tables, clusters, drawings, images, scan facts) |

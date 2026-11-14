@@ -183,6 +183,39 @@ def page_words(doc: pymupdf.Document, index: int) -> list[list[Any]]:
     return [list(w) for w in _page(doc, index).get_text("words")]
 
 
+def page_word_render_modes(doc: pymupdf.Document, index: int) -> list[int | None]:
+    """One entry per `page_words` row, in the same order: the text render mode MuPDF's text trace
+    reports for the characters inside that word's box, by majority (0 fill, 1 stroke, 2 fill+stroke,
+    3 invisible, ...), or None when no traced character's centre falls inside the box.
+
+    Raw MuPDF facts only: the caller decides what "hidden" means (DRAGONAUT Spec 4a D12 reads 3, and
+    None, as hidden). The words themselves are untouched, so `/doc/page-words` stays verbatim.
+    """
+    page = _page(doc, index)
+    words = page.get_text("words")
+    centres: list[tuple[float, float, int]] = []
+    for span in page.get_texttrace():
+        kind = int(span.get("type", 0))
+        for ch in span.get("chars", ()):
+            box = ch[3]
+            centres.append(((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0, kind))
+    # bucket the character centres by row band so each word scans only its neighbours
+    band = 8.0
+    buckets: dict[int, list[tuple[float, float, int]]] = {}
+    for c in centres:
+        buckets.setdefault(int(c[1] // band), []).append(c)
+    modes: list[int | None] = []
+    for w in words:
+        x0, y0, x1, y1 = w[0], w[1], w[2], w[3]
+        counts: dict[int, int] = {}
+        for b in range(int(y0 // band) - 1, int(y1 // band) + 2):
+            for cx, cy, kind in buckets.get(b, ()):
+                if x0 <= cx <= x1 and y0 <= cy <= y1:
+                    counts[kind] = counts.get(kind, 0) + 1
+        modes.append(max(counts, key=lambda k: (counts[k], -k)) if counts else None)
+    return modes
+
+
 def page_blocks(doc: pymupdf.Document, index: int) -> list[dict[str, Any]]:
     """Text blocks as the block-level anchor search consumes them.
 

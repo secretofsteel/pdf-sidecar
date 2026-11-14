@@ -213,7 +213,10 @@ def doc_search(body: SearchBody) -> dict[str, object]:
 def doc_page_words(body: PageBody) -> dict[str, object]:
     path = resolve_allowed(body.path)
     with FITZ_LOCK:
-        return {"words": engine.page_words(cached_document(path), body.page)}
+        doc = cached_document(path)
+        # contract 5: render_modes runs parallel to words (one entry per row, int or null)
+        return {"words": engine.page_words(doc, body.page),
+                "render_modes": engine.page_word_render_modes(doc, body.page)}
 
 
 @app.post("/doc/page-words-ocr")

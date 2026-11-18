@@ -143,3 +143,23 @@ def test_utf8_safe_replaces_each_surrogate_unit_and_nothing_else():
     assert utf8_safe("a" + HIGH + "b") == "a" + REPLACEMENT + "b"
     assert utf8_safe(HIGH + LOW) == REPLACEMENT * 2                     # as MuPDF's text mode does
     assert utf8_safe({"k": [("x" + LOW, 1.5, None)], "n": 3}) == {"k": [["x" + REPLACEMENT, 1.5, None]], "n": 3}
+
+
+def test_an_unhandled_fault_carrying_a_surrogate_still_answers_json(surrogate_pdf, monkeypatch):
+    """The unhandled-exception door is the one fault path where the wrap is load-bearing: MuPDF's
+    exception text can carry what it read, and an unencodable 500 body is not JSON at all."""
+    from fastapi.testclient import TestClient
+
+    from sidecar import engine
+    from sidecar.main import app
+
+    def boom(*_a, **_k):
+        raise RuntimeError("bad glyph x" + HIGH)
+
+    monkeypatch.setattr(engine, "text_pages", boom)
+    with TestClient(app, raise_server_exceptions=False) as c:
+        response = c.post("/doc/text-pages", json={"path": str(surrogate_pdf), "pages": [0]})
+    assert response.status_code == 500
+    body = json.loads(response.content.decode("utf-8"))
+    assert body["error"] == "internal"
+    assert REPLACEMENT in body["detail"] and not _has_surrogate(body["detail"])

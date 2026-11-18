@@ -242,6 +242,18 @@ silently.
   `{"rows": ...}`.** The cite endpoints were re-wrapped when they gained
   per-page error rows; the ingestion payload was deliberately left alone.
 
+### Lone surrogates become U+FFFD
+
+MuPDF's per-character output carries a font's ToUnicode values one UTF-16 code
+unit at a time, so a font that splits a surrogate pair over two glyphs (Cambria
+Math's mathematical letters) leaves lone surrogates in any text built from the
+characters: `find_tables` cell text (`/doc/page-data`'s `tables`) and
+`/doc/to-markdown`. A surrogate cannot be encoded as UTF-8, and those requests
+used to answer 500. Every JSON answer now passes through `sidecar/utf8.py`, which
+gives each surrogate code unit U+FFFD, the value MuPDF's own text modes already
+give it, so a table cell agrees with the page text around it. No shape changes,
+so the wire contract stays 5 (0.1.10).
+
 ## Concurrency
 
 PyMuPDF is not thread-safe. Handlers are sync `def` (so FastAPI runs them off

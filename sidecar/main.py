@@ -45,6 +45,7 @@ from .models import (
     ToMarkdownBody,
 )
 from .paths import resolve_allowed
+from .utf8 import utf8_safe
 from . import engine
 from .engine_state import markdown_state, restore_baseline
 
@@ -131,21 +132,21 @@ def _http_fault(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         body = exc.detail  # one of ours, already in the contract's shape
     else:
         body = {"error": "http", "detail": str(exc.detail)}
-    return JSONResponse(status_code=exc.status_code, content=body)
+    return JSONResponse(status_code=exc.status_code, content=utf8_safe(body))
 
 
 @app.exception_handler(RequestValidationError)
 def _validation_fault(request: Request, exc: RequestValidationError) -> JSONResponse:
     return JSONResponse(
         status_code=422,
-        content={
+        content=utf8_safe({
             "error": "contract",
             "detail": "; ".join(
                 f"{'.'.join(str(p) for p in err['loc'][1:])}: {err['msg']}"
                 for err in exc.errors()
             )
             or "request body does not match the contract",
-        },
+        }),
     )
 
 
@@ -156,7 +157,7 @@ def _unexpected_fault(request: Request, exc: Exception) -> JSONResponse:
     LOGGER.exception("unhandled error serving %s", request.url.path)
     return JSONResponse(
         status_code=500,
-        content={"error": "internal", "detail": f"{type(exc).__name__}: {exc}"},
+        content=utf8_safe({"error": "internal", "detail": f"{type(exc).__name__}: {exc}"}),
     )
 
 
@@ -196,7 +197,7 @@ def doc_info(body: DocBody) -> dict[str, object]:
 def doc_text_pages(body: PagesBody) -> dict[str, object]:
     path = resolve_allowed(body.path)
     with FITZ_LOCK:
-        return {"rows": engine.text_pages(cached_document(path), body.pages)}
+        return utf8_safe({"rows": engine.text_pages(cached_document(path), body.pages)})
 
 
 @app.post("/doc/search")
@@ -206,7 +207,7 @@ def doc_search(body: SearchBody) -> dict[str, object]:
         rows = engine.search(
             cached_document(path), body.needles, body.page_order, body.quads
         )
-    return {"rows": rows}
+    return utf8_safe({"rows": rows})
 
 
 @app.post("/doc/page-words")
@@ -215,8 +216,8 @@ def doc_page_words(body: PageBody) -> dict[str, object]:
     with FITZ_LOCK:
         doc = cached_document(path)
         # contract 5: render_modes runs parallel to words (one entry per row, int or null)
-        return {"words": engine.page_words(doc, body.page),
-                "render_modes": engine.page_word_render_modes(doc, body.page)}
+        return utf8_safe({"words": engine.page_words(doc, body.page),
+                          "render_modes": engine.page_word_render_modes(doc, body.page)})
 
 
 @app.post("/doc/page-words-ocr")
@@ -234,14 +235,14 @@ def doc_page_words_ocr(body: PageWordsOcrBody) -> dict[str, object]:
     """
     path = resolve_allowed(body.path)
     with FITZ_LOCK:
-        return {"words": ocr_words(path, body.page, body.dpi, body.language)}
+        return utf8_safe({"words": ocr_words(path, body.page, body.dpi, body.language)})
 
 
 @app.post("/doc/page-blocks")
 def doc_page_blocks(body: PageBody) -> dict[str, object]:
     path = resolve_allowed(body.path)
     with FITZ_LOCK:
-        return {"blocks": engine.page_blocks(cached_document(path), body.page)}
+        return utf8_safe({"blocks": engine.page_blocks(cached_document(path), body.page)})
 
 
 @app.post("/doc/page-data")
@@ -254,7 +255,8 @@ def doc_page_data(body: PageDataBody) -> list[dict[str, object]]:
     """
     path = resolve_allowed(body.path)
     with FITZ_LOCK:
-        return engine.page_data(cached_document(path), body.pages, body.parts)
+        # Table cell text is assembled from MuPDF's characters and can carry lone surrogates (utf8.py).
+        return utf8_safe(engine.page_data(cached_document(path), body.pages, body.parts))
 
 
 @app.post("/doc/render")
@@ -309,7 +311,8 @@ def doc_to_markdown(body: ToMarkdownBody) -> dict[str, str]:
                 )
             except Exception as exc:
                 raise DocumentFault(fault_detail(exc)) from exc
-    return {"markdown": markdown if isinstance(markdown, str) else ""}
+    # pymupdf4llm builds its text from MuPDF's characters: lone surrogates possible (utf8.py).
+    return utf8_safe({"markdown": markdown if isinstance(markdown, str) else ""})
 
 
 def _size_mb(path: Path) -> float:
